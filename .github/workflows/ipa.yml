@@ -36,9 +36,11 @@ jobs:
             xcfs-${{ runner.os }}-
 
       - name: Fetch frameworks and resources
+        # Upstream scripts use paths relative to the blink repo root.
+        working-directory: blink
         run: |
-          ./blink/get_frameworks.sh
-          ./blink/get_resources.sh
+          ./get_frameworks.sh
+          ./get_resources.sh
 
       - name: Developer setup
         run: cp developer_setup.xcconfig blink/developer_setup.xcconfig
