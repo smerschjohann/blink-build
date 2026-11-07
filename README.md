@@ -41,7 +41,7 @@ cp developer_setup.xcconfig blink/
 ./scripts/build.sh
 ```
 
-Requires Xcode ≥ 16.x. The first run downloads all dependencies (XCFrameworks via
+Requires Xcode ≥ 26 (the raw branch uses iOS 26 SDK APIs like `UIGlassEffect`). The first run downloads all dependencies (XCFrameworks via
 SPM, vim runtime resources).
 
 ## Updating upstream
