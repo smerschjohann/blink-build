@@ -1,0 +1,55 @@
+diff --git a/BlinkConfig/BlinkPaths.m b/BlinkConfig/BlinkPaths.m
+index c5a308b..44601db 100644
+--- a/BlinkConfig/BlinkPaths.m
++++ b/BlinkConfig/BlinkPaths.m
+@@ -76,6 +76,26 @@ NSString *__iCloudsDriveDocumentsPath = nil;
+       // fall back to the app sandbox so Blink can run standalone.
+       path = NSHomeDirectory();
+     }
++
++    // Some re-signed sideload installs end up with a data container that
++    // denies directory creation (EPERM on mkdir). Fall back to the first
++    // location that accepts writes so Blink still gets working storage.
++    if (![self _createDirectoryIfNeeded:[path stringByAppendingPathComponent:@"home"]]) {
++      NSLog(@"[BlinkPaths] Container %@ is not writable, probing fallbacks", path);
++      NSArray *candidates = @[
++        [path stringByAppendingPathComponent:@"Documents"],
++        [path stringByAppendingPathComponent:@"Library"],
++        NSTemporaryDirectory(),
++      ];
++      for (NSString *candidate in candidates) {
++        if ([self _createDirectoryIfNeeded:[candidate stringByAppendingPathComponent:@"home"]]) {
++          NSLog(@"[BlinkPaths] Using writable fallback container %@", candidate);
++          path = candidate;
++          break;
++        }
++      }
++    }
++
+     __groupContainerPath = path;
+   }
+   return __groupContainerPath;
+@@ -158,6 +178,23 @@ NSString *__iCloudsDriveDocumentsPath = nil;
+   return path;
+ }
+ 
+++ (BOOL)_createDirectoryIfNeeded:(NSString *)path {
++  NSFileManager *fm = [NSFileManager defaultManager];
++  BOOL isDir = NO;
++  if ([fm fileExistsAtPath:path isDirectory:&isDir]) {
++    return isDir;
++  }
++  NSError *error = nil;
++  BOOL ok = [fm createDirectoryAtPath:path
++          withIntermediateDirectories:YES
++                           attributes:nil
++                                error:&error];
++  if (!ok) {
++    NSLog(@"[BlinkPaths] Could not create %@: %@", path, error);
++  }
++  return ok;
++}
++
+ + (void)_ensureFolderAtPath:(NSString *)path {
+   BOOL isDir = NO;
+   NSFileManager *fm = [NSFileManager defaultManager];
