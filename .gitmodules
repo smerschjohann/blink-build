@@ -1,0 +1,4 @@
+[submodule "blink"]
+	path = blink
+	url = https://github.com/blinksh/blink.git
+	branch = raw

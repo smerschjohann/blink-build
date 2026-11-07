@@ -1,0 +1,5 @@
+# Patch series applied (in order) to the blink submodule by scripts/apply-patches.sh.
+# One file name per line, relative to patches/. Empty lines and #-comments are ignored.
+#
+# Example:
+#   001-my-change.diff

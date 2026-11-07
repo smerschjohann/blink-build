@@ -1,0 +1,27 @@
+// developer_setup.xcconfig for blink-build.
+// Copied over the blink checkout before building, so bundle id, team and build
+// options can be changed here without patching anything.
+// Upstream template: blink/template_setup.xcconfig
+
+// Only relevant if you re-sign/install via Xcode. Unsigned IPA builds ignore it.
+TEAM_ID = A2H2CL32AG
+
+// Change BUNDLE_ID if you want to install your build next to the App Store version.
+BUNDLE_ID = sh.blink.blinkshell
+GROUP_ID  = sh.blink
+
+CLOUD_ID = sh.blink.blinkshell
+
+KEYCHAIN_ID1 = sh.blink
+
+// BLINK_PUBLISHING_OPTION_DEVELOPER / BLINK_PUBLISHING_OPTION_TESTFLIGHT / BLINK_PUBLISHING_OPTION_APPSTORE
+SWIFT_ACTIVE_COMPILATION_CONDITIONS[config=Debug]   = BLINK_PUBLISHING_OPTION_DEVELOPER
+SWIFT_ACTIVE_COMPILATION_CONDITIONS[config=Release] = BLINK_PUBLISHING_OPTION_TESTFLIGHT
+
+BLINK_MIGRATION_SCHEME = blinkv15
+
+WHATS_NEW_URL = http:/$()/localhost/whats-new
+CONVERSION_OPPORTUNITY_URL = http:/$()/localhost/conversionOpportunity
+WHATS_NEW_GITHUB_URL = http:/$()/localhost/conversionOpportunity
+
+BLINK_APP_FONT = JetBrains Mono

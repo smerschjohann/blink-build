@@ -1,0 +1,55 @@
+name: Build unsigned IPA
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - '**.md'
+  workflow_dispatch:
+
+concurrency:
+  group: ipa-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Select Xcode
+        # Default Xcode on the macos-15 image; bump together with the runner image.
+        run: sudo xcode-select -s /Applications/Xcode_16.4.app
+
+      - name: Apply patches
+        run: ./scripts/apply-patches.sh
+
+      - name: Cache xcfs dependencies
+        uses: actions/cache@v4
+        with:
+          path: blink/xcfs/.build
+          key: xcfs-${{ runner.os }}-${{ hashFiles('blink/xcfs/Package.swift', 'blink/get_frameworks.sh') }}
+          restore-keys: |
+            xcfs-${{ runner.os }}-
+
+      - name: Fetch frameworks and resources
+        run: |
+          ./blink/get_frameworks.sh
+          ./blink/get_resources.sh
+
+      - name: Developer setup
+        run: cp developer_setup.xcconfig blink/developer_setup.xcconfig
+
+      - name: Build unsigned IPA
+        run: ./scripts/build.sh
+
+      - name: Upload IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: Blink-unsigned-ipa
+          path: build/Blink-unsigned.ipa
+          if-no-files-found: error
+          retention-days: 14

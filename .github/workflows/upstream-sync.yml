@@ -1,0 +1,43 @@
+name: Upstream sync
+
+on:
+  schedule:
+    - cron: '23 4 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  bump:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Bump blink and check patches
+        id: bump
+        run: |
+          ./scripts/update-upstream.sh
+          if [ -n "$(git status --porcelain blink)" ]; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            echo "sha=$(git -C blink rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create sync PR
+        if: steps.bump.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          BRANCH="upstream-sync/${{ steps.bump.outputs.sha }}"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -b "$BRANCH"
+          git commit -am "chore: bump blink to ${{ steps.bump.outputs.sha }}"
+          git push origin "$BRANCH"
+          gh pr create \
+            --title "Bump blink to ${{ steps.bump.outputs.sha }}" \
+            --body "Automatic bump of the blink submodule to upstream raw HEAD. Patches apply cleanly. Merging triggers an IPA build on the macOS runners."
