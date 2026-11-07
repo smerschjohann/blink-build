@@ -6,3 +6,5 @@
 001-guard-cloudkit-without-entitlement.diff
 002-fallback-group-container-to-sandbox.diff
 003-migrator-continue-on-error.diff
+004-gate-fileprovider-cleanup.diff
+005-guard-icloud-settings.diff

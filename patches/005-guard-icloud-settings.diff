@@ -1,0 +1,22 @@
+diff --git a/Settings/ViewControllers/UserConfiguration/BKiCloudConfigurationViewController.m b/Settings/ViewControllers/UserConfiguration/BKiCloudConfigurationViewController.m
+index b87890c..0285448 100644
+--- a/Settings/ViewControllers/UserConfiguration/BKiCloudConfigurationViewController.m
++++ b/Settings/ViewControllers/UserConfiguration/BKiCloudConfigurationViewController.m
+@@ -72,6 +72,17 @@
+ 
+ - (void)checkiCloudStatusAndToggle
+ {
++  if ([[NSFileManager defaultManager] ubiquityIdentityToken] == nil) {
++    // No iCloud entitlement (e.g. resigned sideload builds): CKContainer
++    // throws an ObjC exception at first use.
++    UIAlertController *alertController = [UIAlertController alertControllerWithTitle:@"Error" message:@"iCloud is not available in this build" preferredStyle:UIAlertControllerStyleAlert];
++    UIAlertAction *ok = [UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil];
++    [alertController addAction:ok];
++    [self presentViewController:alertController animated:YES completion:nil];
++    [_toggleiCloudSync setOn:NO];
++    return;
++  }
++
+   [[CKContainer defaultContainer] accountStatusWithCompletionHandler:
+ 				    ^(CKAccountStatus accountStatus, NSError *error) {
+               

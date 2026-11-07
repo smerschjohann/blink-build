@@ -1,0 +1,35 @@
+diff --git a/Blink/Migrator/1810Migration.swift b/Blink/Migrator/1810Migration.swift
+index 9b404f7..65a7710 100644
+--- a/Blink/Migrator/1810Migration.swift
++++ b/Blink/Migrator/1810Migration.swift
+@@ -39,6 +39,7 @@ class MigrationFileProviderReplicatedExtension: MigrationStep {
+ 
+   func execute() throws {
+     // Replace old FileProvider extension items with the new FileProvider Replicated Extension
++    var hasFileProviderDomains = false
+     for host in BKHosts.allHosts() {
+       guard let json = host.fpDomainsJSON, !json.isEmpty
+       else {
+@@ -47,6 +48,7 @@ class MigrationFileProviderReplicatedExtension: MigrationStep {
+ 
+       let domains = FileProviderDomain.listFrom(jsonString: json)
+       if domains.count > 0 {
++        hasFileProviderDomains = true
+         domains.forEach { domain in
+           if !domain.useReplicatedExtension {
+             domain.useReplicatedExtension = true
+@@ -61,7 +63,13 @@ class MigrationFileProviderReplicatedExtension: MigrationStep {
+     // Do we need it or does it happen on its own?
+     BKiCloudSyncHandler.shared()?.check(forReachabilityAndSync: nil)
+ 
+-    self.deleteFileProviderStorage()
++    // The old storage only exists when File Provider domains were previously
++    // installed. documentStorageURL throws an ObjC exception in processes
++    // without the File Provider entitlement (e.g. resigned sideload builds),
++    // and Swift cannot catch ObjC exceptions, so only clean up when needed.
++    if hasFileProviderDomains {
++      self.deleteFileProviderStorage()
++    }
+   }
+ 
+   private func deleteFileProviderStorage() {
