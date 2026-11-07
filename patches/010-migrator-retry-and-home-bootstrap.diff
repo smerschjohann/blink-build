@@ -1,0 +1,56 @@
+diff --git a/Blink/AppDelegate.m b/Blink/AppDelegate.m
+index 25b1671..fee7f19 100644
+--- a/Blink/AppDelegate.m
++++ b/Blink/AppDelegate.m
+@@ -81,7 +81,19 @@ void __setupProcessEnv(void) {
+ }
+ 
+ - (BOOL)application:(UIApplication *)application didFinishLaunchingWithOptions:(NSDictionary *)launchOptions {
+-  
++
++  // Ensure the terminal HOME exists up front and surface container problems
++  // loudly (e.g. a broken or read-only sideload container).
++  NSError *homeError = nil;
++  NSString *home = [BlinkPaths homePath];
++  if (![[NSFileManager defaultManager] fileExistsAtPath:home] &&
++      ![[NSFileManager defaultManager] createDirectoryAtPath:home
++                                 withIntermediateDirectories:YES
++                                                  attributes:nil
++                                                       error:&homeError]) {
++    NSLog(@"[BlinkPaths] Could not create home directory %@: %@", home, homeError);
++  }
++
+   [Migrator perform];
+ 
+   [AppDelegate reloadDefaults];
+diff --git a/Blink/Migrator/Migrator.swift b/Blink/Migrator/Migrator.swift
+index ff6bec4..66033df 100644
+--- a/Blink/Migrator/Migrator.swift
++++ b/Blink/Migrator/Migrator.swift
+@@ -49,9 +49,9 @@ import Foundation
+     let currentVersionString = try? String(contentsOf: migratorFileURL, encoding: .utf8)
+     var currentVersion = Int(currentVersionString ?? "0") ?? 0
+ 
+-    steps.forEach { step in
++    for step in steps {
+       guard step.version > currentVersion else {
+-        return
++        continue
+       }
+ 
+       do {
+@@ -64,8 +64,12 @@ import Foundation
+       } catch {
+         // Migration steps are convenience migrations and must not prevent
+         // the app from launching (e.g. on resigned sideload builds).
+-        // Log visibly and keep going; the step is retried on next launch.
+-        NSLog("Migration %d failed, continuing: %@", step.version, String(describing: error))
++        // Log visibly and stop. Later steps must not advance the version
++        // past a failed one, otherwise the failed migration is permanently
++        // skipped (the version file is a high-water mark). The failed step
++        // is retried on the next launch.
++        NSLog("Migration %d failed, skipping remaining migrations: %@", step.version, String(describing: error))
++        break
+       }
+     }
+   }

@@ -12,3 +12,4 @@
 007-kb-config-save-robustness.diff
 008-kbconfig-shortcut-notifications.diff
 009-ensure-ssh-dir-for-knownhosts.diff
+010-migrator-retry-and-home-bootstrap.diff
