@@ -1,0 +1,37 @@
+diff --git a/Blink/KBTracker.swift b/Blink/KBTracker.swift
+index 4cd41b0..00cfd47 100644
+--- a/Blink/KBTracker.swift
++++ b/Blink/KBTracker.swift
+@@ -122,10 +122,15 @@ class KBTracker: NSObject {
+       let url = BlinkPaths.blinkKBConfigURL(),
+       let data = try? encoder.encode(config)
+       else {
++        NSLog("[KBTracker] Failed to encode KB config")
+         return
+     }
+ 
+-    try? data.write(to: url, options: .atomicWrite)
++    do {
++      try data.write(to: url, options: .atomicWrite)
++    } catch {
++      NSLog("[KBTracker] Failed to write kb.json: %@", String(describing: error))
++    }
+     UIMenuSystem.main.setNeedsRebuild()
+   }
+   
+diff --git a/KB/Native/Views/KBConfigView.swift b/KB/Native/Views/KBConfigView.swift
+index 0a0bb6e..74281b3 100644
+--- a/KB/Native/Views/KBConfigView.swift
++++ b/KB/Native/Views/KBConfigView.swift
+@@ -128,6 +128,11 @@ struct KBConfigView: View {
+     .onReceive(config.objectWillChange.debounce(for: 0.5, scheduler: RunLoop.main)) {
+       KBTracker.shared.save(config: self.config)
+     }
++    .onDisappear {
++      // The debounced save is cancelled when the view leaves the hierarchy,
++      // so changes made less than 0.5s before navigating away would be lost.
++      KBTracker.shared.save(config: self.config)
++    }
+ //    .onReceive(_keyboardConnectPublisher) { _ in
+ //      _connectedKeyboardVendorName = GCKeyboard.coalesced?.vendorName
+ //    }

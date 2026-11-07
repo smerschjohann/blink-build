@@ -1,0 +1,44 @@
+diff --git a/BlinkConfig/BKConfig.swift b/BlinkConfig/BKConfig.swift
+index 5d95e30..91adbe7 100644
+--- a/BlinkConfig/BKConfig.swift
++++ b/BlinkConfig/BKConfig.swift
+@@ -50,7 +50,17 @@ public struct BKConfig {
+   public init() throws {
+     _allHosts = BKHosts.allHosts()
+     _allIdentities = BKPubKey.all()
+-    bkSSHConfig = try SSHConfig.parse(url: BlinkPaths.blinkGlobalSSHConfigFileURL())
++
++    let globalConfigURL = BlinkPaths.blinkGlobalSSHConfigFileURL()
++    if FileManager.default.fileExists(atPath: globalConfigURL.path) {
++      bkSSHConfig = try SSHConfig.parse(url: globalConfigURL)
++    } else {
++      // The file is normally bootstrapped by BLKDefaults on first launch.
++      // A missing file must not fail every ssh run (e.g. on resigned
++      // sideload builds with broken prior state).
++      NSLog("[BKConfig] ssh_global missing, using empty global config")
++      bkSSHConfig = SSHConfig()
++    }
+   }
+ 
+   private func _host(_ host: String) -> BKHosts? {
+diff --git a/BlinkConfig/BKGlobalSSHConfig.swift b/BlinkConfig/BKGlobalSSHConfig.swift
+index bbaac3d..4ba3305 100644
+--- a/BlinkConfig/BKGlobalSSHConfig.swift
++++ b/BlinkConfig/BKGlobalSSHConfig.swift
+@@ -82,14 +82,14 @@ Include ../.ssh/config
+       guard let data = configString.data(using: .utf8),
+             let url = BlinkPaths.blinkGlobalSSHConfigFileURL()
+       else {
+-        print("Could not write global ssh configuration")
++        NSLog("[BKGlobalSSHConfig] Could not write global ssh configuration")
+         return
+       }
+ 
+       try data.write(to: url)
+     } catch(let error) {
+       // TODO We could/should rely on a Log + Alert mechanism.
+-      print(error.localizedDescription)
++      NSLog("[BKGlobalSSHConfig] Failed to write ssh_global: %@", String(describing: error))
+     }
+   }
+ }

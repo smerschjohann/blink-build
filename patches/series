@@ -8,3 +8,5 @@
 003-migrator-continue-on-error.diff
 004-gate-fileprovider-cleanup.diff
 005-guard-icloud-settings.diff
+006-ssh-global-selfheal-and-logging.diff
+007-kb-config-save-robustness.diff
