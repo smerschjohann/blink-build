@@ -1,0 +1,34 @@
+diff --git a/Blink/AppDelegate.m b/Blink/AppDelegate.m
+index fee7f19..4e3adec 100644
+--- a/Blink/AppDelegate.m
++++ b/Blink/AppDelegate.m
+@@ -96,6 +96,29 @@ void __setupProcessEnv(void) {
+ 
+   [Migrator perform];
+ 
++  // Storage diagnostics: written into Documents (known to be writable in
++  // broken sideload setups) so they can be read from the in-app terminal
++  // with `cat blink-diag.txt`.
++  {
++    NSString *diagHome = [BlinkPaths homePath];
++    NSString *diag = [NSString stringWithFormat:
++                      @"homePath: %@\nhomeExists: %@\ngroupContainerPath: %@\n"
++                      @"NSHomeDirectory: %@\ntmpDir: %@\nBuild: patch stack 012\n",
++                      diagHome,
++                      [[NSFileManager defaultManager] fileExistsAtPath:diagHome] ? @"YES" : @"NO",
++                      [BlinkPaths groupContainerPath],
++                      NSHomeDirectory(),
++                      NSTemporaryDirectory()];
++    NSError *diagError = nil;
++    [[diag dataUsingEncoding:NSUTF8StringEncoding]
++       writeToFile:[[BlinkPaths documentsPath] stringByAppendingPathComponent:@"blink-diag.txt"]
++           options:NSDataWritingAtomic
++             error:&diagError];
++    if (diagError) {
++      NSLog(@"[BlinkPaths] Could not write diagnostics: %@", diagError);
++    }
++  }
++
+   [AppDelegate reloadDefaults];
+   [[UIView appearance] setTintColor:[UIColor blinkTint]];
+   
