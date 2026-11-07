@@ -1,0 +1,18 @@
+diff --git a/Settings/Network/BKiCloudSyncHandler.m b/Settings/Network/BKiCloudSyncHandler.m
+index 101f1d2..aa25f0b 100644
+--- a/Settings/Network/BKiCloudSyncHandler.m
++++ b/Settings/Network/BKiCloudSyncHandler.m
+@@ -73,7 +73,12 @@ static BKiCloudSyncHandler *sharedHandler = nil;
+ {
+   self = [super init];
+   if (self) {
+-    
++    if ([[NSFileManager defaultManager] ubiquityIdentityToken] == nil) {
++      // No iCloud entitlement (e.g. unsigned or resigned sideload builds):
++      // CKContainer throws an exception at first use. Run without iCloud sync.
++      return nil;
++    }
++
+     BKiCloudContainerIdentifier = [XCConfig infoPlistFullCloudID];
+     [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(checkForReachabilityAndSync:) name:kReachabilityChangedNotification object:nil];
+     [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(checkForReachabilityAndSync:) name:UIApplicationDidBecomeActiveNotification object:nil];
