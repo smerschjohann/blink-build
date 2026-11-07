@@ -10,3 +10,5 @@
 005-guard-icloud-settings.diff
 006-ssh-global-selfheal-and-logging.diff
 007-kb-config-save-robustness.diff
+008-kbconfig-shortcut-notifications.diff
+009-ensure-ssh-dir-for-knownhosts.diff

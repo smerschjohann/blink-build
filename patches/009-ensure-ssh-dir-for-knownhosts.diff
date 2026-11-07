@@ -1,0 +1,15 @@
+diff --git a/Blink/Commands/ssh/SSHConfigProvider.swift b/Blink/Commands/ssh/SSHConfigProvider.swift
+index 9e40a87..9d2e1ce 100644
+--- a/Blink/Commands/ssh/SSHConfigProvider.swift
++++ b/Blink/Commands/ssh/SSHConfigProvider.swift
+@@ -60,6 +60,10 @@ class SSHClientConfigProvider {
+   
+   // Return HostName, SSHClientConfig for the server
+   static func config(host: BKSSHHost, using device: TermDevice) throws -> SSHClientConfig {
++    // libssh2 writes known_hosts under $HOME/.ssh but does not create the
++    // directory itself.
++    _ = BlinkPaths.ssh()
++
+     let prov = try SSHClientConfigProvider(using: device)
+     
+     let agent = prov.agent(for: host)

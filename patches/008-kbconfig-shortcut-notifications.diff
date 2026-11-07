@@ -1,0 +1,16 @@
+diff --git a/KB/Native/Model/KBConfig.swift b/KB/Native/Model/KBConfig.swift
+index 92c5ff9..9667649 100644
+--- a/KB/Native/Model/KBConfig.swift
++++ b/KB/Native/Model/KBConfig.swift
+@@ -91,6 +91,11 @@ class KBConfig: ObservableObject, Codable {
+     command.objectWillChange.sink(receiveValue: objectWillChange.send).store(in: &_cancellable)
+     fnBinding.objectWillChange.sink(receiveValue: objectWillChange.send).store(in: &_cancellable)
+     cursorBinding.objectWillChange.sink(receiveValue: objectWillChange.send).store(in: &_cancellable)
++    // KeyShortcuts are reference types inside the shortcuts array; mutating
++    // them (e.g. Custom Presses) does not reach objectWillChange otherwise.
++    shortcuts.forEach {
++      $0.objectWillChange.sink(receiveValue: objectWillChange.send).store(in: &_cancellable)
++    }
+   }
+   
+   func touch() {
