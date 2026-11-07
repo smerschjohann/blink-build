@@ -4,3 +4,4 @@
 # Example:
 #   001-my-change.diff
 001-guard-cloudkit-without-entitlement.diff
+002-fallback-group-container-to-sandbox.diff

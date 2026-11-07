@@ -1,0 +1,16 @@
+diff --git a/BlinkConfig/BlinkPaths.m b/BlinkConfig/BlinkPaths.m
+index 43bb159..c5a308b 100644
+--- a/BlinkConfig/BlinkPaths.m
++++ b/BlinkConfig/BlinkPaths.m
+@@ -71,6 +71,11 @@ NSString *__iCloudsDriveDocumentsPath = nil;
+ 
+     NSFileManager *fm = [NSFileManager defaultManager];
+     NSString *path = [fm containerURLForSecurityApplicationGroupIdentifier:groupID].path;
++    if (path == nil) {
++      // No App Group entitlement (e.g. unsigned or resigned sideload builds):
++      // fall back to the app sandbox so Blink can run standalone.
++      path = NSHomeDirectory();
++    }
+     __groupContainerPath = path;
+   }
+   return __groupContainerPath;
