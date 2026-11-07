@@ -1,0 +1,17 @@
+diff --git a/Blink/Migrator/Migrator.swift b/Blink/Migrator/Migrator.swift
+index 778f402..ff6bec4 100644
+--- a/Blink/Migrator/Migrator.swift
++++ b/Blink/Migrator/Migrator.swift
+@@ -62,8 +62,10 @@ import Foundation
+           .write(to: migratorFileURL,
+                  options:  [.atomic, .noFileProtection])
+       } catch {
+-        print(error)
+-        exit(0)
++        // Migration steps are convenience migrations and must not prevent
++        // the app from launching (e.g. on resigned sideload builds).
++        // Log visibly and keep going; the step is retried on next launch.
++        NSLog("Migration %d failed, continuing: %@", step.version, String(describing: error))
+       }
+     }
+   }

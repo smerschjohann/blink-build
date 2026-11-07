@@ -5,3 +5,4 @@
 #   001-my-change.diff
 001-guard-cloudkit-without-entitlement.diff
 002-fallback-group-container-to-sandbox.diff
+003-migrator-continue-on-error.diff
