@@ -414,10 +414,104 @@ index b9d4ed9e..7868f579 100644
      case .facecam: src = ["on", "off"]
      case .blinkBuild:
 diff --git a/Blink/SmarterKeys/SmarterTermInput.swift b/Blink/SmarterKeys/SmarterTermInput.swift
-index 23591db4..80918ffd 100644
+index 23591db4..5cda8fd6 100644
 --- a/Blink/SmarterKeys/SmarterTermInput.swift
 +++ b/Blink/SmarterKeys/SmarterTermInput.swift
-@@ -569,6 +569,24 @@ class VSCodeInput: SmarterTermInput {
+@@ -33,6 +33,58 @@ import UIKit
+ import Combine
+ 
+ 
++class CaretHider {
++  var _cancelable: AnyCancellable? = nil
++  weak var _view: UIView?
++
++  private static func findCursorViews(in root: UIView) -> [UIView] {
++    var result: [UIView] = []
++    for subview in root.subviews {
++      let className = subview.classForCoder.description()
++      if className.hasSuffix("CursorView") || className.contains("TextCursor") {
++        result.append(subview)
++      }
++      result.append(contentsOf: findCursorViews(in: subview))
++    }
++    return result
++  }
++
++  private static func applyHidden(_ hidden: Bool, to view: UIView) {
++    if #available(iOS 17.0, *) {
++      for cursorView in findCursorViews(in: view) {
++        cursorView.isHidden = hidden
++        cursorView.alpha = hidden ? 0 : 1
++        cursorView.layer.sublayers?.first?.isHidden = hidden
++      }
++    } else {
++      if let caretView = view.value(forKeyPath: "caretView") as? UIView {
++        caretView.isHidden = hidden
++      }
++      if let floatingView = view.value(forKeyPath: "floatingCaretView") as? UIView {
++        floatingView.isHidden = hidden
++      }
++    }
++  }
++
++  init(view: UIView) {
++    _view = view
++    Self.applyHidden(true, to: view)
++    _cancelable = view.layer.publisher(for: \.sublayers).sink { _ in
++      guard let v = self._view else { return }
++      Self.applyHidden(true, to: v)
++    }
++  }
++
++  func show() {
++    _cancelable?.cancel()
++    _cancelable = nil
++    guard let view = _view else {
++      return
++    }
++    Self.applyHidden(false, to: view)
++  }
++}
++
+ @objc class SmarterTermInput: KBWebView {
+   
+   var kbView = KBView()
+@@ -88,6 +140,8 @@ import Combine
+   func shouldUseWKCopyAndPaste() -> Bool {
+     false
+   }
++
++  private var _caretHider: CaretHider? = nil
+   
+   override func ready() {
+     super.ready()
+@@ -96,11 +150,25 @@ import Combine
+ //    device?.focus()
+     kbView.isHidden = false
+     kbView.invalidateIntrinsicContentSize()
++    hideCaret()
+   }
+   
+   func reset() {
+     
+   }
++
++  override func showCaret() {
++    super.showCaret()
++    _caretHider?.show()
++    _caretHider = nil
++  }
++
++  override func hideCaret() {
++    super.hideCaret()
++    if let v = selectionView() {
++      _caretHider = CaretHider(view: v)
++    }
++  }
+   
+   func reportLang() {
+     let lang = self.textInputMode?.primaryLanguage ?? ""
+@@ -569,14 +637,42 @@ class VSCodeInput: SmarterTermInput {
    override func shouldUseWKCopyAndPaste() -> Bool {
      true
    }
@@ -432,16 +526,40 @@ index 23591db4..80918ffd 100644
 +  override func becomeFirstResponder() -> Bool {
 +    let res = super.becomeFirstResponder()
 +    removeAssistantsFromView()
++    hideCaret()
 +    return res
 +  }
 +
 +  override func ready() {
 +    super.ready()
 +    removeAssistantsFromView()
++    hideCaret()
 +  }
    
    override func canBeFocused() -> Bool {
-     let res = super.canBeFocused()
+-    let res = super.canBeFocused()
+-   
+-    if res == false {
+-      return KBTracker.shared.input == self
++    if !isUserInteractionEnabled {
++      return false
+     }
+-    
+-    return res
++    if let delegate = self.window?.windowScene?.delegate as? SceneDelegate {
++      if delegate.showingPaywall() {
++        return false
++      }
++    }
++    if KBTracker.shared.input != self {
++      KBTracker.shared.attach(input: self)
++    }
++    if !super.canBeFocused() {
++      reportFocus(true)
++    }
++    return true
+   }
+ }
 diff --git a/Blink/Terminal/TermController.swift b/Blink/Terminal/TermController.swift
 index cef620e7..fa7b1ea1 100644
 --- a/Blink/Terminal/TermController.swift
@@ -519,10 +637,93 @@ index cef620e7..fa7b1ea1 100644
      
    public func deviceSizeChanged() {
 diff --git a/Blink/Terminal/TermView.m b/Blink/Terminal/TermView.m
-index 7ffa4175..7ff9646c 100644
+index 7ffa4175..9d9b0030 100644
 --- a/Blink/Terminal/TermView.m
 +++ b/Blink/Terminal/TermView.m
-@@ -240,6 +240,11 @@ struct winsize __winSizeFromJSON(NSDictionary *json) {
+@@ -232,6 +232,82 @@ struct winsize __winSizeFromJSON(NSDictionary *json) {
+     
+     NSURL *scriptURL = [[NSBundle mainBundle] URLForResource:@"blink-uio.min" withExtension:@"js"];
+     NSString * script =  [NSString stringWithContentsOfURL:scriptURL encoding:NSUTF8StringEncoding error:nil];
++    NSString *caretsAndTouchFixScript = @";\n"
++      "(function() {\n"
++      "  function applyBlinkVSCodeFixes() {\n"
++      "    if (!document.getElementById('blink-vscode-caret-fix')) {\n"
++      "      var style = document.createElement('style');\n"
++      "      style.id = 'blink-vscode-caret-fix';\n"
++      "      style.textContent = 'html, body, .monaco-workbench, .monaco-editor textarea, .xterm textarea, textarea.ime-text-area, textarea.inputarea, textarea.xterm-helper-textarea, .native-edit-context { caret-color: transparent !important; } .monaco-workbench input, .monaco-workbench textarea:not(.ime-text-area):not(.xterm-helper-textarea):not(.inputarea) { caret-color: #00ffff !important; }';\n"
++      "      (document.head || document.documentElement).appendChild(style);\n"
++      "    }\n"
++      "    if (document.body && document.body.contentEditable === 'true') {\n"
++      "      document.body.contentEditable = 'false';\n"
++      "    }\n"
++      "    var workbenches = document.getElementsByClassName('monaco-workbench');\n"
++      "    for (var i = 0; i < workbenches.length; i++) {\n"
++      "      if (workbenches[i].contentEditable === 'true') {\n"
++      "        workbenches[i].contentEditable = 'false';\n"
++      "      }\n"
++      "    }\n"
++      "  }\n"
++      "  function shouldShowCaret(el) {\n"
++      "    if (!el || !el.nodeName) return false;\n"
++      "    var tag = el.nodeName.toUpperCase();\n"
++      "    if (tag === 'INPUT') {\n"
++      "      var t = (el.type || 'text').toLowerCase();\n"
++      "      return t === 'text' || t === 'url' || t === 'search' || t === 'password' || t === 'email' || t === 'tel' || t === 'number';\n"
++      "    }\n"
++      "    if (tag === 'TEXTAREA') {\n"
++      "      if (el.classList && (el.classList.contains('inputarea') || el.classList.contains('ime-text-area') || el.classList.contains('xterm-helper-textarea'))) {\n"
++      "        return false;\n"
++      "      }\n"
++      "      if (el.closest && (el.closest('.monaco-editor') || el.closest('.xterm'))) {\n"
++      "        return false;\n"
++      "      }\n"
++      "      return true;\n"
++      "    }\n"
++      "    return false;\n"
++      "  }\n"
++      "  function updateCaretForElement(el) {\n"
++      "    applyBlinkVSCodeFixes();\n"
++      "    var kb = window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers._kb;\n"
++      "    if (!kb) return;\n"
++      "    if (shouldShowCaret(el)) {\n"
++      "      kb.postMessage({ op: 'show-caret' });\n"
++      "    } else {\n"
++      "      if (el === document.body && window.getSelection) {\n"
++      "        var sel = window.getSelection();\n"
++      "        if (sel && sel.type === 'Caret') sel.removeAllRanges();\n"
++      "      }\n"
++      "      kb.postMessage({ op: 'hide-caret' });\n"
++      "    }\n"
++      "  }\n"
++      "  var origInstall = window.__install_uio;\n"
++      "  if (typeof origInstall === 'function') {\n"
++      "    window.__install_uio = function() {\n"
++      "      var res = origInstall.apply(this, arguments);\n"
++      "      applyBlinkVSCodeFixes();\n"
++      "      updateCaretForElement(document.activeElement);\n"
++      "      return res;\n"
++      "    };\n"
++      "  }\n"
++      "  window.addEventListener('pointerdown', function() {\n"
++      "    applyBlinkVSCodeFixes();\n"
++      "  }, true);\n"
++      "  window.addEventListener('focusin', function(e) {\n"
++      "    var target = e.target;\n"
++      "    updateCaretForElement(target);\n"
++      "    setTimeout(function() { updateCaretForElement(document.activeElement || target); }, 0);\n"
++      "  }, false);\n"
++      "  window.addEventListener('focusout', function() {\n"
++      "    setTimeout(function() { updateCaretForElement(document.activeElement); }, 0);\n"
++      "  }, false);\n"
++      "  window.addEventListener('DOMContentLoaded', function() {\n"
++      "    applyBlinkVSCodeFixes();\n"
++      "  });\n"
++      "})();\n";
++    script = [script stringByAppendingString:caretsAndTouchFixScript];
+     WKUserScript *userScript = [[WKUserScript alloc] initWithSource:script injectionTime:WKUserScriptInjectionTimeAtDocumentStart forMainFrameOnly: YES];
+ 
+     [configuration.userContentController addUserScript:userScript];
+@@ -240,6 +316,11 @@ struct winsize __winSizeFromJSON(NSDictionary *json) {
  //    configuration.limitsNavigationsToAppBoundDomains = YES;
  
  
@@ -534,7 +735,17 @@ index 7ffa4175..7ff9646c 100644
    _browserView = [[VSCodeInput alloc] initWithFrame:CGRectZero configuration:configuration];
    _browserView.customUserAgent =
  //  [@"Mozilla/5.0 (Linux; Intel Mac OS X 10_15_6) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/15.1 Safari/605.1.15 " stringByAppendingString:agent];
-@@ -263,27 +268,56 @@ struct winsize __winSizeFromJSON(NSDictionary *json) {
+@@ -253,6 +334,9 @@ struct winsize __winSizeFromJSON(NSDictionary *json) {
+   [_browserView setOpaque:NO];
+   _browserView.backgroundColor = [UIColor clearColor];
+   _browserView.scrollView.backgroundColor = [UIColor clearColor];
++  _browserView.scrollView.delaysContentTouches = NO;
++  _browserView.scrollView.canCancelContentTouches = NO;
++  [_browserView hideCaret];
+   
+   // Setup browser view constraints to match web view
+   _browserView.translatesAutoresizingMaskIntoConstraints = NO;
+@@ -263,27 +347,56 @@ struct winsize __winSizeFromJSON(NSDictionary *json) {
      [_browserView.bottomAnchor constraintEqualToAnchor:_webView.bottomAnchor]
    ]];
  
@@ -601,7 +812,7 @@ index 7ffa4175..7ff9646c 100644
  }
  
  
-@@ -297,6 +331,7 @@ struct winsize __winSizeFromJSON(NSDictionary *json) {
+@@ -297,6 +410,7 @@ struct winsize __winSizeFromJSON(NSDictionary *json) {
    BrowserController * ctrl = [[BrowserController alloc] init];
    
    WKWebView * wv = [[WKWebView alloc] initWithFrame:ctrl.view.bounds configuration:configuration];
@@ -609,7 +820,7 @@ index 7ffa4175..7ff9646c 100644
    
    [ctrl setWebView: wv];
    
-@@ -642,6 +677,7 @@ struct winsize __winSizeFromJSON(NSDictionary *json) {
+@@ -642,6 +756,7 @@ struct winsize __winSizeFromJSON(NSDictionary *json) {
      [_device viewNotify:data];
    } else if ([operation isEqualToString:@"browser-ready"]) {
      [_browserView ready];
@@ -617,6 +828,58 @@ index 7ffa4175..7ff9646c 100644
      [[NSNotificationCenter defaultCenter] postNotificationName:TermViewBrowserReadyNotificationKey object:self];
    } else if ([operation isEqualToString:@"ring-bell"]) {
      [_device viewDidReceiveBellRing];
+@@ -724,13 +839,13 @@ struct winsize __winSizeFromJSON(NSDictionary *json) {
+ 
+ - (void)_handleSelectionChange:(NSDictionary *)data
+ {
+-  _selectedText = data[@"text"];
+-  _hasSelection = _selectedText.length > 0;
+-  _gestureInteraction.hasSelection = _hasSelection;
+-  
+   if (_browserView) {
+     return;
+   }
++
++  _selectedText = data[@"text"];
++  _hasSelection = _selectedText.length > 0;
++  _gestureInteraction.hasSelection = _hasSelection;
+   
+   [_device viewSelectionChanged];
+   
+diff --git a/Blink/WebKit/WKWebView.swift b/Blink/WebKit/WKWebView.swift
+index a04ca8ab..0d79d58f 100644
+--- a/Blink/WebKit/WKWebView.swift
++++ b/Blink/WebKit/WKWebView.swift
+@@ -286,6 +286,9 @@ class UIScrollViewWithoutHitTest: UIScrollView {
+       }
+ 
+       if !_cmdKeyPressed && !wasInDragMode {
++        if !focused {
++          _wkWebView?.evaluateJavaScript("term_reportMouseClick(\(point.x), \(point.y), 1, \(BLKDefaults.isKeyCastsOn() ? "true" : "false"));", completionHandler: nil)
++        }
+         if let target = _wkWebView?.target(forAction: #selector(focusOnShellAction), withSender: self) as? UIResponder {
+           target.perform(#selector(focusOnShellAction), with: self)
+         }
+diff --git a/KB/Native/Views/KBWebViewBase.m b/KB/Native/Views/KBWebViewBase.m
+index 5551777d..2f3ec341 100644
+--- a/KB/Native/Views/KBWebViewBase.m
++++ b/KB/Native/Views/KBWebViewBase.m
+@@ -425,11 +425,13 @@ NSString *_encodeString(NSString *str);
+ }
+ 
+ - (void)hideCaret {
+-  
++  self.tintColor = [UIColor clearColor];
++  self.scrollView.subviews.firstObject.tintColor = [UIColor clearColor];
+ }
+ 
+ - (void)showCaret {
+-  
++  self.tintColor = [UIColor cyanColor];
++  self.scrollView.subviews.firstObject.tintColor = [UIColor cyanColor];
+ }
+ 
+ 
 diff --git a/Resources/blinkCommandsDictionary.plist b/Resources/blinkCommandsDictionary.plist
 index 6929877a..fde4a05d 100644
 --- a/Resources/blinkCommandsDictionary.plist
