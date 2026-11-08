@@ -1,0 +1,1059 @@
+diff --git a/Blink/Commands/code.swift b/Blink/Commands/code.swift
+index d62a2a0b..b1cc8931 100644
+--- a/Blink/Commands/code.swift
++++ b/Blink/Commands/code.swift
+@@ -33,6 +33,7 @@ import Foundation
+ import ArgumentParser
+ import BlinkCode
+ import Network
++import Security
+ 
+ import ios_system
+ 
+@@ -238,3 +239,351 @@ extension FileLocationPath {
+     }
+   }
+ }
++
++// MARK: - mTLS Code-Server Integration
++
++public enum CodeServerError: Error, LocalizedError {
++  case emptyAlias
++  case invalidAliasWhitespace
++  case duplicateAlias(String)
++  case emptyHost
++  case invalidHostURL(String)
++  case invalidCertPassword
++  case pkcs12ImportFailed(OSStatus)
++  case noIdentityInPKCS12
++  case storageError(String)
++
++  public var errorDescription: String? {
++    switch self {
++    case .emptyAlias:
++      return "Alias is required."
++    case .invalidAliasWhitespace:
++      return "Spaces are not permitted in the alias."
++    case .duplicateAlias(let alias):
++      return "A code-server with alias '\(alias)' already exists."
++    case .emptyHost:
++      return "Host / URL is required."
++    case .invalidHostURL(let host):
++      return "Invalid Host / URL: \(host)"
++    case .invalidCertPassword:
++      return "Invalid password for PKCS#12 client certificate."
++    case .pkcs12ImportFailed(let status):
++      return "Could not import PKCS#12 client certificate (OSStatus \(status))."
++    case .noIdentityInPKCS12:
++      return "PKCS#12 file does not contain a valid client identity (certificate + private key)."
++    case .storageError(let msg):
++      return "Failed to save code-server configuration: \(msg)"
++    }
++  }
++}
++
++public struct CodeServerEntry: Codable, Identifiable, Equatable {
++  public var id: UUID
++  public var alias: String
++  public var host: String
++  public var defaultFolder: String
++  public var clientCertData: Data?
++  public var clientCertFileName: String
++  public var clientCertPassword: String
++  public var clientCertSubject: String
++
++  public init(
++    id: UUID = UUID(),
++    alias: String,
++    host: String,
++    defaultFolder: String = "",
++    clientCertData: Data? = nil,
++    clientCertFileName: String = "",
++    clientCertPassword: String = "",
++    clientCertSubject: String = ""
++  ) {
++    self.id = id
++    self.alias = alias
++    self.host = host
++    self.defaultFolder = defaultFolder
++    self.clientCertData = clientCertData
++    self.clientCertFileName = clientCertFileName
++    self.clientCertPassword = clientCertPassword
++    self.clientCertSubject = clientCertSubject
++  }
++
++  public func normalizedBaseURL() -> URL? {
++    let trimmed = host.trimmingCharacters(in: .whitespacesAndNewlines)
++    guard !trimmed.isEmpty else { return nil }
++    let urlString: String
++    if trimmed.lowercased().hasPrefix("http://") || trimmed.lowercased().hasPrefix("https://") {
++      urlString = trimmed
++    } else {
++      urlString = "https://\(trimmed)"
++    }
++    guard let url = URL(string: urlString), let urlHost = url.host, !urlHost.isEmpty else {
++      return nil
++    }
++    return url
++  }
++
++  public func resolvedURL(folderPath: String? = nil) -> URL? {
++    guard let baseURL = normalizedBaseURL() else { return nil }
++    let effectivePath = (folderPath?.trimmingCharacters(in: .whitespacesAndNewlines)).flatMap { $0.isEmpty ? nil : $0 }
++      ?? (defaultFolder.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : defaultFolder.trimmingCharacters(in: .whitespacesAndNewlines))
++
++    guard let path = effectivePath, !path.isEmpty else {
++      return baseURL
++    }
++
++    guard var components = URLComponents(url: baseURL, resolvingAgainstBaseURL: false) else {
++      return baseURL
++    }
++    let queryKey = path.hasSuffix(".code-workspace") ? "workspace" : "folder"
++    var queryItems = (components.queryItems ?? []).filter { $0.name != "folder" && $0.name != "workspace" }
++    queryItems.append(URLQueryItem(name: queryKey, value: path))
++    components.queryItems = queryItems
++    return components.url ?? baseURL
++  }
++}
++
++@objc public class CodeServerManager: NSObject {
++  @objc public static let shared = CodeServerManager()
++
++  private let fm = FileManager.default
++
++  private var storageURL: URL {
++    let dir = BlinkPaths.blinkURL()!
++    if !fm.fileExists(atPath: dir.path) {
++      try? fm.createDirectory(at: dir, withIntermediateDirectories: true)
++    }
++    return dir.appendingPathComponent("code-servers.json")
++  }
++
++  public func loadEntries() -> [CodeServerEntry] {
++    let url = storageURL
++    guard fm.fileExists(atPath: url.path),
++          let data = try? Data(contentsOf: url),
++          let entries = try? JSONDecoder().decode([CodeServerEntry].self, from: data)
++    else {
++      return []
++    }
++    return entries
++  }
++
++  public func saveEntries(_ entries: [CodeServerEntry]) throws {
++    let encoder = JSONEncoder()
++    encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
++    do {
++      let data = try encoder.encode(entries)
++      try data.write(to: storageURL, options: [.atomic])
++    } catch {
++      throw CodeServerError.storageError(error.localizedDescription)
++    }
++  }
++
++  public func upsertEntry(_ entry: CodeServerEntry) throws {
++    let cleanAlias = entry.alias.trimmingCharacters(in: .whitespacesAndNewlines)
++    if cleanAlias.isEmpty {
++      throw CodeServerError.emptyAlias
++    }
++    if cleanAlias.rangeOfCharacter(from: .whitespacesAndNewlines) != nil {
++      throw CodeServerError.invalidAliasWhitespace
++    }
++    let cleanHost = entry.host.trimmingCharacters(in: .whitespacesAndNewlines)
++    if cleanHost.isEmpty {
++      throw CodeServerError.emptyHost
++    }
++
++    var normalizedEntry = entry
++    normalizedEntry.alias = cleanAlias
++    normalizedEntry.host = cleanHost
++    normalizedEntry.defaultFolder = entry.defaultFolder.trimmingCharacters(in: .whitespacesAndNewlines)
++
++    guard normalizedEntry.normalizedBaseURL() != nil else {
++      throw CodeServerError.invalidHostURL(cleanHost)
++    }
++
++    if let certData = normalizedEntry.clientCertData, !certData.isEmpty {
++      let (_, _, subject) = try Self.validatePKCS12(data: certData, password: normalizedEntry.clientCertPassword)
++      normalizedEntry.clientCertSubject = subject
++    } else {
++      normalizedEntry.clientCertFileName = ""
++      normalizedEntry.clientCertSubject = ""
++    }
++
++    var entries = loadEntries()
++    if entries.contains(where: { $0.id != normalizedEntry.id && $0.alias.lowercased() == cleanAlias.lowercased() }) {
++      throw CodeServerError.duplicateAlias(cleanAlias)
++    }
++
++    if let idx = entries.firstIndex(where: { $0.id == normalizedEntry.id }) {
++      entries[idx] = normalizedEntry
++    } else {
++      entries.append(normalizedEntry)
++    }
++    try saveEntries(entries)
++  }
++
++  public func deleteEntry(id: UUID) {
++    var entries = loadEntries()
++    entries.removeAll { $0.id == id }
++    try? saveEntries(entries)
++  }
++
++  public func entry(forAlias alias: String) -> CodeServerEntry? {
++    let trimmed = alias.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
++    return loadEntries().first { $0.alias.lowercased() == trimmed }
++  }
++
++  public func allAliases() -> [String] {
++    loadEntries().map { $0.alias }.sorted()
++  }
++
++  public static func validatePKCS12(data: Data, password: String) throws -> (SecIdentity, [SecCertificate], String) {
++    var rawItems: CFArray?
++    let options: [String: Any] = [
++      kSecImportExportPassphrase as String: password
++    ]
++    let status = SecPKCS12Import(data as NSData, options as CFDictionary, &rawItems)
++    guard status == errSecSuccess else {
++      if status == errSecAuthFailed || status == errSecPkcs12VerifyFailure {
++        throw CodeServerError.invalidCertPassword
++      }
++      throw CodeServerError.pkcs12ImportFailed(status)
++    }
++
++    guard
++      let items = rawItems as? [[String: Any]],
++      let firstItem = items.first,
++      let rawIdentity = firstItem[kSecImportItemIdentity as String]
++    else {
++      throw CodeServerError.noIdentityInPKCS12
++    }
++
++    let secIdentity = rawIdentity as! SecIdentity
++    let certChain = (firstItem[kSecImportItemCertChain as String] as? [SecCertificate]) ?? []
++
++    var secCert: SecCertificate?
++    SecIdentityCopyCertificate(secIdentity, &secCert)
++    let subject = secCert.flatMap { SecCertificateCopySubjectSummary($0) as String? } ?? "Client Certificate"
++
++    return (secIdentity, certChain, subject)
++  }
++
++  @objc(credentialForHost:port:)
++  public func credential(forHost host: String, port: Int) -> URLCredential? {
++    let lowerHost = host.lowercased()
++    let entries = loadEntries().filter {
++      guard let certData = $0.clientCertData, !certData.isEmpty else { return false }
++      guard let url = $0.normalizedBaseURL(), let entryHost = url.host?.lowercased() else { return false }
++      return entryHost == lowerHost
++    }
++
++    guard !entries.isEmpty else {
++      return nil
++    }
++
++    // Prefer exact port match first, then fallback to host match
++    let matchedEntry = entries.first(where: { entry in
++      guard let url = entry.normalizedBaseURL() else { return false }
++      let entryPort = url.port ?? (url.scheme?.lowercased() == "http" ? 80 : 443)
++      return port <= 0 || entryPort == port
++    }) ?? entries[0]
++
++    guard
++      let certData = matchedEntry.clientCertData,
++      let (identity, certChain, _) = try? Self.validatePKCS12(data: certData, password: matchedEntry.clientCertPassword)
++    else {
++      return nil
++    }
++
++    let intermediates: [SecCertificate]? = certChain.count > 1 ? Array(certChain.dropFirst()) : nil
++    return URLCredential(identity: identity, certificates: intermediates, persistence: .forSession)
++  }
++}
++
++struct CodeServerCommand: NonStdIOCommand {
++  static var configuration = CommandConfiguration(
++    commandName: "code-server",
++    abstract: "Starts mTLS code-server editor for a configured alias",
++    discussion: """
++      Connects to a configured code-server instance using mTLS client certificates
++      and Blink's native keyboard integration (without the iOS PWA keyboard overlay).
++      Configure instances in Settings -> Connect -> Code Servers.
++      To close the editor, use your Blink close tab shortcut (default Cmd-W).
++      """
++  )
++
++  @OptionGroup var verboseOptions: VerboseOptions
++  var io = NonStdIO.standard
++
++  @Flag(name: .shortAndLong, help: "List configured code-server aliases")
++  var list: Bool = false
++
++  @Argument(help: "Configured code-server alias")
++  var alias: String?
++
++  @Argument(help: "Optional remote folder or workspace path to open")
++  var folderPath: String?
++
++  mutating func run() throws {
++    let entries = CodeServerManager.shared.loadEntries()
++
++    if list {
++      if entries.isEmpty {
++        print("No code-server instances configured. Add one in Settings -> Connect -> Code Servers.")
++      } else {
++        for entry in entries.sorted(by: { $0.alias < $1.alias }) {
++          let certInfo = (entry.clientCertData?.isEmpty == false)
++            ? " [mTLS: \(entry.clientCertSubject.isEmpty ? entry.clientCertFileName : entry.clientCertSubject)]"
++            : ""
++          print("\(entry.alias)\t\(entry.host)\(certInfo)")
++        }
++      }
++      return
++    }
++
++    guard let alias = alias?.trimmingCharacters(in: .whitespacesAndNewlines), !alias.isEmpty else {
++      if !entries.isEmpty {
++        print("Configured code-server aliases: \(entries.map { $0.alias }.sorted().joined(separator: ", "))")
++      } else {
++        print("No code-server aliases configured yet. Add one in Settings -> Connect -> Code Servers.")
++      }
++      throw CleanExit.helpRequest(self)
++    }
++
++    guard let entry = CodeServerManager.shared.entry(forAlias: alias) else {
++      let available = entries.map { $0.alias }.sorted().joined(separator: ", ")
++      let hint = available.isEmpty ? "Configure aliases in Settings -> Connect -> Code Servers." : "Available aliases: \(available)"
++      throw CommandError(message: "Unknown code-server alias '\(alias)'. \(hint)")
++    }
++
++    if let certData = entry.clientCertData, !certData.isEmpty {
++      do {
++        _ = try CodeServerManager.validatePKCS12(data: certData, password: entry.clientCertPassword)
++      } catch {
++        throw CommandError(message: "Client certificate error for '\(entry.alias)': \(error.localizedDescription)")
++      }
++    }
++
++    guard let targetURL = entry.resolvedURL(folderPath: folderPath) else {
++      throw CommandError(message: "Invalid URL configured for code-server '\(entry.alias)': \(entry.host)")
++    }
++
++    let session = Unmanaged<MCPSession>.fromOpaque(thread_context).takeUnretainedValue()
++    let view = session.device?.view
++    DispatchQueue.main.async {
++      view?.addBrowserWebView(targetURL, agent: "", injectUIO: true)
++    }
++  }
++}
++
++@_cdecl("codeserver_main")
++public func codeserver_main(argc: Int32, argv: Argv) -> Int32 {
++  setvbuf(thread_stdin,  nil, _IONBF, 0)
++  setvbuf(thread_stdout, nil, _IONBF, 0)
++  setvbuf(thread_stderr, nil, _IONBF, 0)
++
++  let io = NonStdIO.standard
++  io.in_ = InputStream(file: thread_stdin)
++  io.out = OutputStream(file: thread_stdout)
++  io.err = OutputStream(file: thread_stderr)
++
++  return CodeServerCommand.main(Array(argv.args(count: argc)[1...]), io: io)
++}
+diff --git a/Blink/Commands/help.m b/Blink/Commands/help.m
+index 6960129e..80273c97 100644
+--- a/Blink/Commands/help.m
++++ b/Blink/Commands/help.m
+@@ -65,6 +65,7 @@ int help_main(int argc, char *argv[]) {
+     @"  ssh: ssh client.",
+     @"  config: Setup ssh keys, hosts, keyboard, etc.",
+     @"  code: code editor. (don't forget install blink-fs extension)",
++    @"  code-server: connect to configured mTLS code-server instances.",
+     @"  help: Prints this.",
+     @"  whatsnew: Discover new features.",
+     @"  exit: Close this shell.",
+diff --git a/Blink/Complete.swift b/Blink/Complete.swift
+index b9d4ed9e..7868f579 100644
+--- a/Blink/Complete.swift
++++ b/Blink/Complete.swift
+@@ -74,6 +74,7 @@ struct Complete {
+     case directory
+     case host
+     case blinkHost
++    case blinkCodeServer
+     case blinkGeo
+     case blinkBuild
+     case facecam
+@@ -192,7 +193,9 @@ struct Complete {
+       "open": "open url of file (Experimental). 📤",
+       "link-files": "link folders from Files.app (Experimental).",
+       "build": "Access to Blink dev machines. ⚒ ",
+-      "facecam": "Control facecam widget"
++      "facecam": "Control facecam widget",
++      "code": "Starts code editor.",
++      "code-server": "Connect to a configured mTLS code-server."
+     ]
+     
+     __commandHintsCache = result
+@@ -203,6 +206,7 @@ struct Complete {
+     switch cmd {
+     case "": return .command
+     case "ssh", "ssh2", "mosh", "mosh1": return .blinkHost
++    case "code-server": return .blinkCodeServer
+     case "ping": return .host
+     case "sftp", "scp": return _scpCompletionKind(query)
+     case "ls": return .directory
+@@ -380,6 +384,7 @@ struct Complete {
+     case .directory: src = _allPaths(prefix: input, skipFiles: true);
+     case .host: src = _allHosts();
+     case .blinkHost: src = _allBlinkHosts();
++    case .blinkCodeServer: src = CodeServerManager.shared.allAliases();
+     case .blinkGeo: src = ["track", "lock", "stop", "current", "authorize", "last"]
+     case .facecam: src = ["on", "off"]
+     case .blinkBuild:
+diff --git a/Blink/SmarterKeys/SmarterTermInput.swift b/Blink/SmarterKeys/SmarterTermInput.swift
+index 23591db4..80918ffd 100644
+--- a/Blink/SmarterKeys/SmarterTermInput.swift
++++ b/Blink/SmarterKeys/SmarterTermInput.swift
+@@ -569,6 +569,24 @@ class VSCodeInput: SmarterTermInput {
+   override func shouldUseWKCopyAndPaste() -> Bool {
+     true
+   }
++
++  override var inputAssistantItem: UITextInputAssistantItem {
++    let item = super.inputAssistantItem
++    item.leadingBarButtonGroups = []
++    item.trailingBarButtonGroups = []
++    return item
++  }
++
++  override func becomeFirstResponder() -> Bool {
++    let res = super.becomeFirstResponder()
++    removeAssistantsFromView()
++    return res
++  }
++
++  override func ready() {
++    super.ready()
++    removeAssistantsFromView()
++  }
+   
+   override func canBeFocused() -> Bool {
+     let res = super.canBeFocused()
+diff --git a/Blink/Terminal/TermController.swift b/Blink/Terminal/TermController.swift
+index cef620e7..fa7b1ea1 100644
+--- a/Blink/Terminal/TermController.swift
++++ b/Blink/Terminal/TermController.swift
+@@ -184,11 +184,15 @@ class TermController: UIViewController {
+   }
+   
+   var isAttached: Bool {
+-    KBTracker.shared.input == _termDevice.view?.webView
++    guard let view = _termDevice.view else { return false }
++    let activeInput = view.browserView ?? view.webView
++    return KBTracker.shared.input == activeInput
+   }
+   
+   override var isFirstResponder: Bool {
+-    _termDevice.view?.webView.isFirstResponder ?? false
++    guard let view = _termDevice.view else { return false }
++    let activeInput = view.browserView ?? view.webView
++    return activeInput?.isFirstResponder ?? false
+   }
+ 
+   @objc var termView: TermView { _termView }
+@@ -216,7 +220,8 @@ class TermController: UIViewController {
+   }
+ 
+   func removeFromContainer() -> Bool {
+-    if KBTracker.shared.input == _termView.webView {
++    if KBTracker.shared.input == _termView.webView ||
++       (_termView.browserView != nil && KBTracker.shared.input == _termView.browserView) {
+       return false
+     }
+     _proxyView.removeControlledView()
+@@ -423,7 +428,7 @@ extension TermController: TermDeviceDelegate {
+   }
+ 
+   
+-  func activateInput() {
++  @objc func activateInput() {
+     // Don't activate input if blocked (e.g., during Snips Input Mode)
+     guard !shouldBlockFirstResponder else {
+       return
+@@ -446,12 +451,13 @@ extension TermController: TermDeviceDelegate {
+ 
+     guard let deviceView = _termDevice.view else { return }
+ 
+-    deviceView.webView.reportFocus(false)
++    let activeInput = deviceView.browserView ?? deviceView.webView
++    activeInput?.reportFocus(false)
+ 
+     // It is key to reset here so when attached again, settings are synced and the keyboard state is properly reset.
+     KBTracker.shared.attach(input: nil)
+ 
+-    _ = _termDevice.view?.webView.resignFirstResponder()
++    _ = activeInput?.resignFirstResponder()
+   }
+   
+   private func _attachInput() {
+@@ -481,7 +487,8 @@ extension TermController: TermDeviceDelegate {
+ 
+     if !isAttached && !isReady{ return }
+ 
+-    deviceView.webView.reportFocus(true)
++    let activeInput = deviceView.browserView ?? deviceView.webView
++    activeInput?.reportFocus(true)
+     _termDevice.focus()
+ 
+     let input = KBTracker.shared.input
+@@ -490,7 +497,7 @@ extension TermController: TermDeviceDelegate {
+       input?.reportFocus(false)
+     }
+ 
+-    _ = _termDevice.view?.webView.becomeFirstResponder()
++    _ = activeInput?.becomeFirstResponder()
+   }
+     
+   public func deviceSizeChanged() {
+diff --git a/Blink/Terminal/TermView.m b/Blink/Terminal/TermView.m
+index 7ffa4175..7ff9646c 100644
+--- a/Blink/Terminal/TermView.m
++++ b/Blink/Terminal/TermView.m
+@@ -240,6 +240,11 @@ struct winsize __winSizeFromJSON(NSDictionary *json) {
+ //    configuration.limitsNavigationsToAppBoundDomains = YES;
+ 
+ 
++  if (_browserView) {
++    [_browserView removeFromSuperview];
++    _browserView = nil;
++  }
++
+   _browserView = [[VSCodeInput alloc] initWithFrame:CGRectZero configuration:configuration];
+   _browserView.customUserAgent =
+ //  [@"Mozilla/5.0 (Linux; Intel Mac OS X 10_15_6) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/15.1 Safari/605.1.15 " stringByAppendingString:agent];
+@@ -263,27 +268,56 @@ struct winsize __winSizeFromJSON(NSDictionary *json) {
+     [_browserView.bottomAnchor constraintEqualToAnchor:_webView.bottomAnchor]
+   ]];
+ 
++  [(TermController *)_termController activateInput];
++
+   NSURLRequest *request = [NSURLRequest requestWithURL:url];
+   [_browserView loadRequest:request];
+ }
+ 
++- (void)webView:(WKWebView *)webView didFinishNavigation:(WKNavigation *)navigation {
++  if (webView == _browserView) {
++    [_browserView removeAssistantsFromView];
++  }
++}
++
+ - (void)webView:(WKWebView *)webView decidePolicyForNavigationAction:(WKNavigationAction *)navigationAction decisionHandler:(void (^)(WKNavigationActionPolicy))decisionHandler {
+   decisionHandler(WKNavigationActionPolicyAllow);
+ }
+ 
+ - (void)webView:(WKWebView *)webView didReceiveAuthenticationChallenge:(NSURLAuthenticationChallenge *)challenge completionHandler:(void (^)(NSURLSessionAuthChallengeDisposition, NSURLCredential * _Nullable))completionHandler {
+-  NSURLCredential *cred = [[NSURLCredential alloc] initWithTrust:challenge.protectionSpace.serverTrust];
+-
+-  dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+-    if ([challenge.protectionSpace.host isEqual: @"localhost"]) {
+-      // Let localhost go through.
+-      completionHandler(NSURLSessionAuthChallengeUseCredential, cred);
++  NSString *authMethod = challenge.protectionSpace.authenticationMethod;
++  if ([authMethod isEqualToString:NSURLAuthenticationMethodClientCertificate]) {
++    if (challenge.previousFailureCount > 0) {
++      completionHandler(NSURLSessionAuthChallengeCancelAuthenticationChallenge, nil);
+       return;
+     }
+-    
+-    completionHandler(NSURLSessionAuthChallengePerformDefaultHandling, cred);
+-  });
+-  
++    NSURLCredential *clientCred = [[CodeServerManager shared] credentialForHost:challenge.protectionSpace.host
++                                                                           port:challenge.protectionSpace.port];
++    if (clientCred != nil) {
++      completionHandler(NSURLSessionAuthChallengeUseCredential, clientCred);
++      return;
++    }
++    completionHandler(NSURLSessionAuthChallengePerformDefaultHandling, nil);
++    return;
++  }
++
++  if ([authMethod isEqualToString:NSURLAuthenticationMethodServerTrust] &&
++      challenge.protectionSpace.serverTrust != NULL) {
++    NSURLCredential *cred = [[NSURLCredential alloc] initWithTrust:challenge.protectionSpace.serverTrust];
++
++    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
++      if ([challenge.protectionSpace.host isEqual:@"localhost"]) {
++        // Let localhost go through.
++        completionHandler(NSURLSessionAuthChallengeUseCredential, cred);
++        return;
++      }
++
++      completionHandler(NSURLSessionAuthChallengePerformDefaultHandling, nil);
++    });
++    return;
++  }
++
++  completionHandler(NSURLSessionAuthChallengePerformDefaultHandling, nil);
+ }
+ 
+ 
+@@ -297,6 +331,7 @@ struct winsize __winSizeFromJSON(NSDictionary *json) {
+   BrowserController * ctrl = [[BrowserController alloc] init];
+   
+   WKWebView * wv = [[WKWebView alloc] initWithFrame:ctrl.view.bounds configuration:configuration];
++  wv.navigationDelegate = self;
+   
+   [ctrl setWebView: wv];
+   
+@@ -642,6 +677,7 @@ struct winsize __winSizeFromJSON(NSDictionary *json) {
+     [_device viewNotify:data];
+   } else if ([operation isEqualToString:@"browser-ready"]) {
+     [_browserView ready];
++    [(TermController *)_termController activateInput];
+     [[NSNotificationCenter defaultCenter] postNotificationName:TermViewBrowserReadyNotificationKey object:self];
+   } else if ([operation isEqualToString:@"ring-bell"]) {
+     [_device viewDidReceiveBellRing];
+diff --git a/Resources/blinkCommandsDictionary.plist b/Resources/blinkCommandsDictionary.plist
+index 6929877a..fde4a05d 100644
+--- a/Resources/blinkCommandsDictionary.plist
++++ b/Resources/blinkCommandsDictionary.plist
+@@ -170,6 +170,13 @@
+ 		<string></string>
+ 		<string>no</string>
+ 	</array>
++	<key>code-server</key>
++	<array>
++		<string>MAIN</string>
++		<string>codeserver_main</string>
++		<string></string>
++		<string>no</string>
++	</array>
+ 	<key>browse</key>
+ 	<array>
+ 		<string>MAIN</string>
+diff --git a/Settings/SettingsView.swift b/Settings/SettingsView.swift
+index d6c846f7..e0bd98af 100644
+--- a/Settings/SettingsView.swift
++++ b/Settings/SettingsView.swift
+@@ -33,6 +33,7 @@
+ import Foundation
+ import SwiftUI
+ import LocalAuthentication
++import UniformTypeIdentifiers
+ 
+ struct SettingsView: View {
+ 
+@@ -103,6 +104,11 @@ struct SettingsView: View {
+         } details: {
+           HostListView()
+         }
++        Row {
++          Label("Code Servers", systemImage: "chevron.left.forwardslash.chevron.right")
++        } details: {
++          CodeServerListView()
++        }
+         Row {
+           Label("Default Agent", systemImage: "key.viewfinder")
+         } details: {
+@@ -261,3 +267,397 @@ fileprivate struct BlinkClassicToPlusWindow: View {
+     .background(.black)
+   }
+ }
++
++// MARK: - Code Servers Settings UI
++
++struct CodeServerRow: View {
++  let entry: CodeServerEntry
++  let reloadList: () -> ()
++
++  var body: some View {
++    Row(
++      content: {
++        HStack {
++          VStack(alignment: .leading, spacing: 2) {
++            Text(entry.alias)
++            if !entry.clientCertSubject.isEmpty {
++              Label(entry.clientCertSubject, systemImage: "checkmark.shield.fill")
++                .font(.caption)
++                .foregroundColor(.green)
++            } else if entry.clientCertData?.isEmpty == false {
++              Label(entry.clientCertFileName.isEmpty ? "Client Certificate" : entry.clientCertFileName, systemImage: "lock.shield")
++                .font(.caption)
++                .foregroundColor(.secondary)
++            }
++          }
++          Spacer()
++          Text(entry.host)
++            .font(.system(.subheadline))
++            .foregroundColor(.secondary)
++            .lineLimit(1)
++        }
++      },
++      details: {
++        CodeServerView(entry: entry, reloadList: reloadList)
++      }
++    )
++  }
++}
++
++struct CodeServerListView: View {
++  @StateObject private var _state = CodeServersObservable()
++  @EnvironmentObject private var _nav: Nav
++
++  var body: some View {
++    Group {
++      if _state.list.isEmpty {
++        EmptyStateView(
++          action: Button(
++            action: _addCodeServer,
++            label: { Label("Add Code Server", systemImage: "plus") }
++          ),
++          systemIconName: "chevron.left.forwardslash.chevron.right",
++          description: "Configure code-server instances with mTLS client certificates to use with the `code-server` command."
++        )
++      } else {
++        Group {
++          if _state.filteredList.isEmpty {
++            EmptyStateView(
++              action: Button(
++                action: _addCodeServer,
++                label: { Label("Add Code Server", systemImage: "plus") }
++              ),
++              systemIconName: "chevron.left.forwardslash.chevron.right"
++            )
++          } else {
++            List {
++              ForEach(Array(_state.filteredList.enumerated()), id: \.element.id) { index, entry in
++                CodeServerRow(entry: entry, reloadList: _state.reloadEntries)
++                  .contextMenu(menuItems: {
++                    Button(action: {
++                      _duplicateCodeServer(entry: entry)
++                    }, label: { Label("Duplicate", systemImage: "plus.square.on.square") })
++                    Divider()
++                    Button(role: .destructive, action: {
++                      _state.deleteEntries(indexSet: IndexSet([index]))
++                    }, label: { Label("Delete", systemImage: "trash") })
++                  })
++              }.onDelete(perform: _state.deleteEntries)
++            }
++            .listStyle(InsetGroupedListStyle())
++            .navigationBarItems(
++              trailing: HStack {
++                Menu {
++                  Section(header: Text("Order")) {
++                    SortButton(label: "Alias", sortType: $_state.sortType, asc: .aliasAsc, desc: .aliasDesc)
++                    SortButton(label: "Host",  sortType: $_state.sortType, asc: .hostAsc,  desc: .hostDesc)
++                  }
++                } label: { Image(systemName: "list.bullet").frame(width: 38, height: 38, alignment: .center) }
++                Button(
++                  action: _addCodeServer,
++                  label: { Image(systemName: "plus").frame(width: 38, height: 38, alignment: .center) }
++                )
++              }
++            )
++          }
++        }
++        .searchable(text: $_state.filterQuery)
++      }
++    }
++    .onAppear(perform: _state.reloadEntries)
++    .navigationBarTitle("Code Servers")
++  }
++
++  private func _addCodeServer() {
++    let rootView = CodeServerView(entry: nil, reloadList: _state.reloadEntries).environmentObject(_nav)
++    let vc = UIHostingController(rootView: rootView)
++    _nav.navController.pushViewController(vc, animated: true)
++  }
++
++  private func _duplicateCodeServer(entry: CodeServerEntry) {
++    let rootView = CodeServerView(duplicatingEntry: entry, reloadList: _state.reloadEntries).environmentObject(_nav)
++    let vc = UIHostingController(rootView: rootView)
++    _nav.navController.pushViewController(vc, animated: true)
++  }
++}
++
++fileprivate class CodeServersObservable: ObservableObject {
++  enum SortType {
++    case aliasAsc, aliasDesc, hostAsc, hostDesc
++
++    var sortFn: (_ a: CodeServerEntry, _ b: CodeServerEntry) -> Bool {
++      switch self {
++      case .aliasAsc:  return { a, b in a.alias < b.alias }
++      case .aliasDesc: return { a, b in b.alias < a.alias }
++      case .hostAsc:   return { a, b in a.host < b.host }
++      case .hostDesc:  return { a, b in b.host < a.host }
++      }
++    }
++  }
++
++  @Published var filterQuery: String = "" {
++    didSet {
++      filterIfNeeded()
++    }
++  }
++
++  @Published var sortType: SortType = .aliasAsc {
++    didSet {
++      list = list.sorted(by: sortType.sortFn)
++      filterIfNeeded()
++    }
++  }
++
++  @Published var filteredList: [CodeServerEntry] = []
++
++  var list: [CodeServerEntry] = CodeServerManager.shared.loadEntries()
++    .sorted(by: SortType.aliasAsc.sortFn)
++
++  init() {
++    filterIfNeeded()
++  }
++
++  func filterIfNeeded() {
++    let trimmedQuery = filterQuery.trimmingCharacters(in: .whitespacesAndNewlines)
++    if trimmedQuery.isEmpty {
++      filteredList = list
++      return
++    }
++    filteredList = list.filter { entry in
++      entry.alias.localizedCaseInsensitiveContains(trimmedQuery) ||
++      entry.host.localizedCaseInsensitiveContains(trimmedQuery) ||
++      entry.clientCertSubject.localizedCaseInsensitiveContains(trimmedQuery)
++    }
++  }
++
++  func reloadEntries() {
++    list = CodeServerManager.shared.loadEntries().sorted(by: sortType.sortFn)
++    filterIfNeeded()
++  }
++
++  func deleteEntries(indexSet: IndexSet) {
++    let entriesToDelete = indexSet.map { filteredList[$0] }
++    for entry in entriesToDelete {
++      CodeServerManager.shared.deleteEntry(id: entry.id)
++    }
++    reloadEntries()
++  }
++}
++
++struct CodeServerView: View {
++  @EnvironmentObject private var _nav: Nav
++
++  private var _existingEntry: CodeServerEntry?
++  private var _duplicatedEntry: CodeServerEntry?
++  private var _reloadList: () -> ()
++
++  @State private var _id: UUID = UUID()
++  @State private var _alias: String = ""
++  @State private var _host: String = ""
++  @State private var _defaultFolder: String = ""
++  @State private var _certData: Data? = nil
++  @State private var _certFileName: String = ""
++  @State private var _certPassword: String = ""
++  @State private var _certSubject: String = ""
++  @State private var _certStatusError: String = ""
++  @State private var _showFileImporter: Bool = false
++  @State private var _loaded: Bool = false
++  @State private var _errorMessage: String = ""
++
++  private var _cleanAlias: String {
++    _alias.trimmingCharacters(in: .whitespacesAndNewlines)
++  }
++
++  init(entry: CodeServerEntry?, reloadList: @escaping () -> ()) {
++    _existingEntry = entry
++    _duplicatedEntry = nil
++    _reloadList = reloadList
++  }
++
++  init(duplicatingEntry entry: CodeServerEntry, reloadList: @escaping () -> ()) {
++    _existingEntry = nil
++    _duplicatedEntry = entry
++    _reloadList = reloadList
++  }
++
++  private func _usageHint() -> String {
++    var alias = _cleanAlias
++    if alias.isEmpty {
++      alias = "[alias]"
++    }
++    return "Use `code-server \(alias) [folder-path]` from the shell to connect."
++  }
++
++  var body: some View {
++    List {
++      Section(footer: Text(verbatim: _usageHint())) {
++        Field("Alias", $_alias, next: "Host", placeholder: "Required")
++      }
++
++      Section(
++        header: Text("CODE-SERVER"),
++        footer: Text("Enter the hostname or HTTPS URL of your code-server instance.")
++      ) {
++        Field("Host", $_host, next: "Folder", placeholder: "https://code.example.com:8443", kbType: .URL)
++        Field("Folder", $_defaultFolder, next: "Password", placeholder: "Optional default remote folder path")
++      }
++
++      Section(
++        header: Text("CLIENT CERTIFICATE (mTLS)"),
++        footer: Text("Import a PKCS#12 (.p12 / .pfx) bundle containing your client certificate and private key.")
++      ) {
++        if let certData = _certData, !certData.isEmpty {
++          HStack {
++            FormLabel(text: "Certificate")
++            Spacer()
++            VStack(alignment: .trailing, spacing: 2) {
++              if !_certSubject.isEmpty {
++                Label(_certSubject, systemImage: "checkmark.shield.fill")
++                  .font(.system(.subheadline))
++                  .foregroundColor(.green)
++              } else {
++                Label(_certStatusError.isEmpty ? "Password required" : _certStatusError, systemImage: "exclamationmark.triangle.fill")
++                  .font(.caption)
++                  .foregroundColor(.orange)
++              }
++              if !_certFileName.isEmpty {
++                Text(_certFileName)
++                  .font(.caption2)
++                  .foregroundColor(.secondary)
++              }
++            }
++          }
++        }
++
++        Button(action: {
++          _showFileImporter = true
++        }) {
++          Label(
++            (_certData?.isEmpty == false) ? "Replace PKCS#12 (.p12 / .pfx)..." : "Import PKCS#12 (.p12 / .pfx)...",
++            systemImage: "doc.badge.plus"
++          )
++        }
++
++        FieldPassword("Password", $_certPassword, next: "Alias", placeholder: "PKCS#12 password")
++          .onChange(of: _certPassword) { _ in
++            _refreshCertPreview()
++          }
++
++        if _certData?.isEmpty == false {
++          Button(role: .destructive, action: {
++            _certData = nil
++            _certFileName = ""
++            _certSubject = ""
++            _certStatusError = ""
++          }) {
++            Label("Remove Client Certificate", systemImage: "trash")
++              .foregroundColor(.red)
++          }
++        }
++      }
++    }
++    .listStyle(GroupedListStyle())
++    .fileImporter(
++      isPresented: $_showFileImporter,
++      allowedContentTypes: [.pkcs12, .data, .item],
++      onCompletion: _handleCertImport
++    )
++    .alert(errorMessage: $_errorMessage)
++    .navigationBarItems(
++      leading: Button("Discard", action: {
++        _nav.navController.popViewController(animated: true)
++      }),
++      trailing: Button("Save", action: {
++        guard _saveEntry() else { return }
++        _reloadList()
++        _nav.navController.popViewController(animated: true)
++      })
++    )
++    .navigationBarBackButtonHidden(true)
++    .navigationBarTitle(_existingEntry == nil ? "New Code Server" : "Code Server")
++    .onAppear {
++      if !_loaded {
++        _loadEntry()
++      }
++    }
++  }
++
++  private func _loadEntry() {
++    _loaded = true
++    if let entry = _existingEntry {
++      _id = entry.id
++      _alias = entry.alias
++      _host = entry.host
++      _defaultFolder = entry.defaultFolder
++      _certData = entry.clientCertData
++      _certFileName = entry.clientCertFileName
++      _certPassword = entry.clientCertPassword
++      _certSubject = entry.clientCertSubject
++      _refreshCertPreview()
++    } else if let dup = _duplicatedEntry {
++      _id = UUID()
++      _alias = "\(dup.alias)-copy"
++      _host = dup.host
++      _defaultFolder = dup.defaultFolder
++      _certData = dup.clientCertData
++      _certFileName = dup.clientCertFileName
++      _certPassword = dup.clientCertPassword
++      _certSubject = dup.clientCertSubject
++      _refreshCertPreview()
++    }
++  }
++
++  private func _refreshCertPreview() {
++    guard let data = _certData, !data.isEmpty else {
++      _certSubject = ""
++      _certStatusError = ""
++      return
++    }
++    do {
++      let (_, _, subject) = try CodeServerManager.validatePKCS12(data: data, password: _certPassword)
++      _certSubject = subject
++      _certStatusError = ""
++    } catch {
++      _certSubject = ""
++      _certStatusError = "Enter valid password"
++    }
++  }
++
++  private func _handleCertImport(_ result: Result<URL, Error>) {
++    do {
++      let url = try result.get()
++      let scoped = url.startAccessingSecurityScopedResource()
++      defer {
++        if scoped {
++          url.stopAccessingSecurityScopedResource()
++        }
++      }
++      let data = try Data(contentsOf: url, options: .alwaysMapped)
++      _certData = data
++      _certFileName = url.lastPathComponent
++      _refreshCertPreview()
++    } catch {
++      _errorMessage = "Could not read certificate file: \(error.localizedDescription)"
++    }
++  }
++
++  private func _saveEntry() -> Bool {
++    let entry = CodeServerEntry(
++      id: _id,
++      alias: _alias,
++      host: _host,
++      defaultFolder: _defaultFolder,
++      clientCertData: _certData,
++      clientCertFileName: _certFileName,
++      clientCertPassword: _certPassword,
++      clientCertSubject: _certSubject
++    )
++    do {
++      try CodeServerManager.shared.upsertEntry(entry)
++      return true
++    } catch {
++      _errorMessage = error.localizedDescription
++      return false
++    }
++  }
++}

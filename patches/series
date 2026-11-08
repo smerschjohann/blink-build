@@ -14,3 +14,4 @@
 009-ensure-ssh-dir-for-knownhosts.diff
 010-migrator-retry-and-home-bootstrap.diff
 012-storage-diagnostics-file.diff
+013-code-server-mtls.diff
