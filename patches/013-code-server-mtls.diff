@@ -413,6 +413,18 @@ index b9d4ed9e..7868f579 100644
      case .blinkGeo: src = ["track", "lock", "stop", "current", "authorize", "last"]
      case .facecam: src = ["on", "off"]
      case .blinkBuild:
+diff --git a/Blink/KBTracker.swift b/Blink/KBTracker.swift
+index 00cfd477..f6480268 100644
+--- a/Blink/KBTracker.swift
++++ b/Blink/KBTracker.swift
+@@ -131,6 +131,7 @@ class KBTracker: NSObject {
+     } catch {
+       NSLog("[KBTracker] Failed to write kb.json: %@", String(describing: error))
+     }
++    input?.configure(config)
+     UIMenuSystem.main.setNeedsRebuild()
+   }
+   
 diff --git a/Blink/SmarterKeys/SmarterTermInput.swift b/Blink/SmarterKeys/SmarterTermInput.swift
 index 23591db4..5cda8fd6 100644
 --- a/Blink/SmarterKeys/SmarterTermInput.swift
@@ -637,10 +649,10 @@ index cef620e7..fa7b1ea1 100644
      
    public func deviceSizeChanged() {
 diff --git a/Blink/Terminal/TermView.m b/Blink/Terminal/TermView.m
-index 7ffa4175..adfcc710 100644
+index 7ffa4175..4d58065f 100644
 --- a/Blink/Terminal/TermView.m
 +++ b/Blink/Terminal/TermView.m
-@@ -232,14 +232,647 @@ struct winsize __winSizeFromJSON(NSDictionary *json) {
+@@ -232,14 +232,940 @@ struct winsize __winSizeFromJSON(NSDictionary *json) {
      
      NSURL *scriptURL = [[NSBundle mainBundle] URLForResource:@"blink-uio.min" withExtension:@"js"];
      NSString * script =  [NSString stringWithContentsOfURL:scriptURL encoding:NSUTF8StringEncoding error:nil];
@@ -695,14 +707,304 @@ index 7ffa4175..adfcc710 100644
 +      "      kb.postMessage({ op: 'hide-caret' });\n"
 +      "    }\n"
 +      "  }\n"
++      "\n"
++      "  var currentKBConfig = null;\n"
++      "  var lastNativeKBTime = 0;\n"
++      "  var lastDomShortcutTime = 0;\n"
++      "\n"
++      "  function decodeHex(hexStr) {\n"
++      "    if (!hexStr || typeof hexStr !== 'string') return '';\n"
++      "    var len = hexStr.length;\n"
++      "    var bytes = new Uint8Array(Math.floor(len / 2));\n"
++      "    for (var i = 0, j = 0; i < len; i += 2, j++) {\n"
++      "      bytes[j] = parseInt(hexStr.substr(i, 2), 16);\n"
++      "    }\n"
++      "    try {\n"
++      "      return new TextDecoder('utf-8', { fatal: true }).decode(bytes);\n"
++      "    } catch (e) {\n"
++      "      var out = '';\n"
++      "      for (var k = 0; k < bytes.length; k++) {\n"
++      "        out += String.fromCharCode(bytes[k]);\n"
++      "      }\n"
++      "      return out;\n"
++      "    }\n"
++      "  }\n"
++      "\n"
++      "  function getDeepActiveElement(doc) {\n"
++      "    doc = doc || document;\n"
++      "    var el = doc.activeElement;\n"
++      "    while (el && el.shadowRoot && el.shadowRoot.activeElement) {\n"
++      "      el = el.shadowRoot.activeElement;\n"
++      "    }\n"
++      "    if (el && (el.tagName === 'IFRAME' || el.tagName === 'FRAME')) {\n"
++      "      try {\n"
++      "        if (el.contentDocument && el.contentDocument.activeElement) {\n"
++      "          return getDeepActiveElement(el.contentDocument);\n"
++      "        }\n"
++      "      } catch (e) {}\n"
++      "    }\n"
++      "    return el;\n"
++      "  }\n"
++      "\n"
++      "  function findActiveInputTarget() {\n"
++      "    var el = getDeepActiveElement(document);\n"
++      "    if (el && el !== document.body && !el.classList.contains('monaco-workbench')) {\n"
++      "      return el;\n"
++      "    }\n"
++      "    var xtermFocused = document.querySelector('.xterm.focus textarea.xterm-helper-textarea, .terminal.focus textarea.xterm-helper-textarea');\n"
++      "    if (xtermFocused) return xtermFocused;\n"
++      "    var monacoFocused = document.querySelector('.monaco-editor.focused textarea.inputarea, .monaco-editor.focused .native-edit-context');\n"
++      "    if (monacoFocused) return monacoFocused;\n"
++      "    var anyInput = document.querySelector('input:focus, textarea:focus');\n"
++      "    if (anyInput) return anyInput;\n"
++      "    return el || document.body;\n"
++      "  }\n"
++      "\n"
++      "  function insertTextIntoElement(text, target) {\n"
++      "    if (!text) return;\n"
++      "    var el = (target && target !== document.body && (!target.classList || !target.classList.contains('monaco-workbench'))) ? target : findActiveInputTarget();\n"
++      "    if (!el) return;\n"
++      "\n"
++      "    var isXterm = el.classList && (el.classList.contains('xterm-helper-textarea') || (el.closest && el.closest('.xterm')));\n"
++      "    if (isXterm) {\n"
++      "      try {\n"
++      "        var inpEv = new InputEvent('input', {\n"
++      "          data: text,\n"
++      "          inputType: 'insertText',\n"
++      "          bubbles: true,\n"
++      "          cancelable: false,\n"
++      "          composed: false\n"
++      "        });\n"
++      "        el.dispatchEvent(inpEv);\n"
++      "      } catch (e) {\n"
++      "        var ev = new CustomEvent('input', { bubbles: true });\n"
++      "        ev.data = text;\n"
++      "        ev.inputType = 'insertText';\n"
++      "        el.dispatchEvent(ev);\n"
++      "      }\n"
++      "      el.value = '';\n"
++      "      return;\n"
++      "    }\n"
++      "\n"
++      "    if (typeof el.selectionStart === 'number' && typeof el.setRangeText === 'function') {\n"
++      "      var start = el.selectionStart;\n"
++      "      var end = el.selectionEnd;\n"
++      "      el.setRangeText(text, start, end, 'end');\n"
++      "      try {\n"
++      "        var inp = new InputEvent('input', {\n"
++      "          data: text,\n"
++      "          inputType: 'insertText',\n"
++      "          bubbles: true,\n"
++      "          cancelable: false,\n"
++      "          composed: false\n"
++      "        });\n"
++      "        el.dispatchEvent(inp);\n"
++      "      } catch (e2) {\n"
++      "        var ev2 = new Event('input', { bubbles: true, cancelable: false });\n"
++      "        el.dispatchEvent(ev2);\n"
++      "      }\n"
++      "      return;\n"
++      "    }\n"
++      "\n"
++      "    if (el.editContext) {\n"
++      "      var ec = el.editContext;\n"
++      "      var selStart = typeof ec.selectionStart === 'number' ? ec.selectionStart : 0;\n"
++      "      var selEnd = typeof ec.selectionEnd === 'number' ? ec.selectionEnd : selStart;\n"
++      "      try {\n"
++      "        ec.dispatchEvent(new TextUpdateEvent('textupdate', {\n"
++      "          updateRangeStart: selStart,\n"
++      "          updateRangeEnd: selEnd,\n"
++      "          text: text,\n"
++      "          selectionStart: selStart + text.length,\n"
++      "          selectionEnd: selStart + text.length\n"
++      "        }));\n"
++      "      } catch (err) {}\n"
++      "      return;\n"
++      "    }\n"
++      "\n"
++      "    if (el.isContentEditable || document.designMode === 'on') {\n"
++      "      try {\n"
++      "        document.execCommand('insertText', false, text);\n"
++      "      } catch (e3) {}\n"
++      "      return;\n"
++      "    }\n"
++      "  }\n"
++      "\n"
++      "  function matchesShortcut(shortcut, e) {\n"
++      "    if (!shortcut || !shortcut.input) return false;\n"
++      "    var sMods = typeof shortcut.modifiers === 'number' ? shortcut.modifiers : 0;\n"
++      "    var eMods = (e.shiftKey ? 131072 : 0) |\n"
++      "                (e.ctrlKey  ? 262144 : 0) |\n"
++      "                (e.altKey   ? 524288 : 0) |\n"
++      "                (e.metaKey  ? 1048576 : 0);\n"
++      "    if (sMods !== eMods) return false;\n"
++      "\n"
++      "    var sInput = shortcut.input;\n"
++      "    if (e.key && sInput.toLowerCase() === e.key.toLowerCase()) return true;\n"
++      "\n"
++      "    if (e.code) {\n"
++      "      var codeLower = e.code.toLowerCase();\n"
++      "      if (codeLower === ('key' + sInput).toLowerCase()) return true;\n"
++      "      if (codeLower === ('digit' + sInput).toLowerCase()) return true;\n"
++      "      if (codeLower === sInput.toLowerCase()) return true;\n"
++      "    }\n"
++      "\n"
++      "    if (sInput === String.fromCharCode(13) && e.key && e.key.toLowerCase() === 'enter') return true;\n"
++      "    if (sInput === String.fromCharCode(9) && e.key && e.key.toLowerCase() === 'tab') return true;\n"
++      "    if (sInput === String.fromCharCode(8) && e.key && e.key.toLowerCase() === 'backspace') return true;\n"
++      "    if (sInput === ' ' && (e.key === ' ' || e.key === 'space')) return true;\n"
++      "\n"
++      "    var specialMap = {\n"
++      "      'UIKeyInputUpArrow': 'arrowup',\n"
++      "      'UIKeyInputDownArrow': 'arrowdown',\n"
++      "      'UIKeyInputLeftArrow': 'arrowleft',\n"
++      "      'UIKeyInputRightArrow': 'arrowright',\n"
++      "      'UIKeyInputEscape': 'escape',\n"
++      "      'UIKeyInputHome': 'home',\n"
++      "      'UIKeyInputEnd': 'end',\n"
++      "      'UIKeyInputPageUp': 'pageup',\n"
++      "      'UIKeyInputPageDown': 'pagedown'\n"
++      "    };\n"
++      "    if (specialMap[sInput] && e.key && specialMap[sInput] === e.key.toLowerCase()) {\n"
++      "      return true;\n"
++      "    }\n"
++      "\n"
++      "    for (var fNum = 1; fNum <= 12; fNum++) {\n"
++      "      if (sInput === ('UIKeyInputF' + fNum) && e.key && e.key.toLowerCase() === ('f' + fNum)) {\n"
++      "        return true;\n"
++      "      }\n"
++      "    }\n"
++      "\n"
++      "    return false;\n"
++      "  }\n"
++      "\n"
++      "  function executeShortcutAction(action, e) {\n"
++      "    if (!action) return;\n"
++      "    var target = (e && e.target) ? e.target : null;\n"
++      "    if (action.type === 'hex') {\n"
++      "      var text = decodeHex(action.value);\n"
++      "      insertTextIntoElement(text, target);\n"
++      "      return;\n"
++      "    }\n"
++      "    if (action.type === 'press') {\n"
++      "      if (action.stringInput) {\n"
++      "        insertTextIntoElement(action.stringInput, target);\n"
++      "        return;\n"
++      "      }\n"
++      "      var k = action.key;\n"
++      "      var mods = action.mods || 0;\n"
++      "      var ch = typeof k === 'string' ? k : (k && (k.key || k.code));\n"
++      "      if (ch && ch.length === 1 && (mods === 0 || mods === 131072)) {\n"
++      "        insertTextIntoElement(ch, target);\n"
++      "        return;\n"
++      "      }\n"
++      "      var kb = window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers._kb;\n"
++      "      if (kb) {\n"
++      "        kb.postMessage({ op: 'out', data: '' });\n"
++      "      }\n"
++      "      return;\n"
++      "    }\n"
++      "    if (action.type === 'command') {\n"
++      "      var kb2 = window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers._kb;\n"
++      "      if (kb2) {\n"
++      "        kb2.postMessage({ op: 'command', command: action.value });\n"
++      "      }\n"
++      "      return;\n"
++      "    }\n"
++      "  }\n"
++      "\n"
++      "  function handleCaptureKeyDown(e) {\n"
++      "    if (e.__blink) return;\n"
++      "    if (!currentKBConfig || !currentKBConfig.shortcuts) return;\n"
++      "\n"
++      "    var shortcuts = currentKBConfig.shortcuts;\n"
++      "    for (var i = 0; i < shortcuts.length; i++) {\n"
++      "      var sc = shortcuts[i];\n"
++      "      if (matchesShortcut(sc, e)) {\n"
++      "        e.preventDefault();\n"
++      "        e.stopPropagation();\n"
++      "        e.stopImmediatePropagation();\n"
++      "        var now = Date.now();\n"
++      "        if (now - lastNativeKBTime > 100) {\n"
++      "          lastDomShortcutTime = now;\n"
++      "          executeShortcutAction(sc.action, e);\n"
++      "        }\n"
++      "        return;\n"
++      "      }\n"
++      "    }\n"
++      "  }\n"
++      "\n"
++      "  function installBlinkKBOverrides() {\n"
++      "    var prevOnKB = window._onKB;\n"
++      "    window._onKB = function(op, arg) {\n"
++      "      if (op === 'config') {\n"
++      "        try {\n"
++      "          currentKBConfig = typeof arg === 'string' ? JSON.parse(arg) : arg;\n"
++      "        } catch (e) {\n"
++      "          currentKBConfig = null;\n"
++      "        }\n"
++      "        return;\n"
++      "      }\n"
++      "\n"
++      "      if (op === 'hex') {\n"
++      "        var now = Date.now();\n"
++      "        lastNativeKBTime = now;\n"
++      "        if (now - lastDomShortcutTime < 100) {\n"
++      "          return;\n"
++      "        }\n"
++      "        var text = decodeHex(arg);\n"
++      "        insertTextIntoElement(text);\n"
++      "        return;\n"
++      "      }\n"
++      "\n"
++      "      if (op === 'press' || op === 'toolbar-press') {\n"
++      "        var nowPress = Date.now();\n"
++      "        lastNativeKBTime = nowPress;\n"
++      "        if (nowPress - lastDomShortcutTime < 100) {\n"
++      "          return;\n"
++      "        }\n"
++      "        if (typeof arg === 'string' && arg.indexOf('0:0:0:') === 0) {\n"
++      "          insertTextIntoElement(arg.replace('0:0:0:', ''));\n"
++      "          return;\n"
++      "        }\n"
++      "        if (typeof arg === 'string') {\n"
++      "          var parts = arg.split(/:/g);\n"
++      "          var mods = parseInt(parts[0], 10) || 0;\n"
++      "          var keyChar = (parts[3] === '' ? ':' : parts[3]) || '';\n"
++      "          var isPrintable = keyChar.length === 1 && (mods === 0 || mods === 131072);\n"
++      "          if (isPrintable) {\n"
++      "            insertTextIntoElement(keyChar);\n"
++      "            return;\n"
++      "          }\n"
++      "        }\n"
++      "        if (typeof prevOnKB === 'function') {\n"
++      "          prevOnKB(op, arg);\n"
++      "        }\n"
++      "        return;\n"
++      "      }\n"
++      "\n"
++      "      if (typeof prevOnKB === 'function') {\n"
++      "        prevOnKB(op, arg);\n"
++      "      }\n"
++      "    };\n"
++      "\n"
++      "    window.__blinkHandleCaptureKeyDown = handleCaptureKeyDown;\n"
++      "    window.removeEventListener('keydown', handleCaptureKeyDown, true);\n"
++      "    window.addEventListener('keydown', handleCaptureKeyDown, true);\n"
++      "  }\n"
++      "\n"
 +      "  var origInstall = window.__install_uio;\n"
 +      "  if (typeof origInstall === 'function') {\n"
 +      "    window.__install_uio = function() {\n"
 +      "      var res = origInstall.apply(this, arguments);\n"
 +      "      applyBlinkVSCodeFixes();\n"
 +      "      updateCaretForElement(document.activeElement);\n"
++      "      installBlinkKBOverrides();\n"
 +      "      return res;\n"
 +      "    };\n"
++      "  }\n"
++      "  if (typeof window._onKB === 'function') {\n"
++      "    installBlinkKBOverrides();\n"
 +      "  }\n"
 +      "  window.addEventListener('pointerdown', function() {\n"
 +      "    applyBlinkVSCodeFixes();\n"
@@ -1143,6 +1445,9 @@ index 7ffa4175..adfcc710 100644
 +      "  function instrumentInnerDocument(innerDoc) {\n"
 +      "    if (!innerDoc || innerDoc.__blinkInstrumented) return;\n"
 +      "    innerDoc.__blinkInstrumented = true;\n"
++      "    if (window.parent && typeof window.parent.__blinkHandleCaptureKeyDown === 'function') {\n"
++      "      try { innerDoc.addEventListener('keydown', window.parent.__blinkHandleCaptureKeyDown, true); } catch (eKey) {}\n"
++      "    }\n"
 +      "    var baseEl = innerDoc.querySelector && innerDoc.querySelector('base[href]');\n"
 +      "    var baseUrl = (baseEl && baseEl.getAttribute('href')) || window.location.href;\n"
 +      "    var innerWin = innerDoc.defaultView;\n"
@@ -1288,7 +1593,7 @@ index 7ffa4175..adfcc710 100644
    _browserView = [[VSCodeInput alloc] initWithFrame:CGRectZero configuration:configuration];
    _browserView.customUserAgent =
  //  [@"Mozilla/5.0 (Linux; Intel Mac OS X 10_15_6) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/15.1 Safari/605.1.15 " stringByAppendingString:agent];
-@@ -253,6 +886,9 @@ struct winsize __winSizeFromJSON(NSDictionary *json) {
+@@ -253,6 +1179,9 @@ struct winsize __winSizeFromJSON(NSDictionary *json) {
    [_browserView setOpaque:NO];
    _browserView.backgroundColor = [UIColor clearColor];
    _browserView.scrollView.backgroundColor = [UIColor clearColor];
@@ -1298,7 +1603,7 @@ index 7ffa4175..adfcc710 100644
    
    // Setup browser view constraints to match web view
    _browserView.translatesAutoresizingMaskIntoConstraints = NO;
-@@ -263,27 +899,56 @@ struct winsize __winSizeFromJSON(NSDictionary *json) {
+@@ -263,27 +1192,56 @@ struct winsize __winSizeFromJSON(NSDictionary *json) {
      [_browserView.bottomAnchor constraintEqualToAnchor:_webView.bottomAnchor]
    ]];
  
@@ -1365,7 +1670,7 @@ index 7ffa4175..adfcc710 100644
  }
  
  
-@@ -297,6 +962,7 @@ struct winsize __winSizeFromJSON(NSDictionary *json) {
+@@ -297,6 +1255,7 @@ struct winsize __winSizeFromJSON(NSDictionary *json) {
    BrowserController * ctrl = [[BrowserController alloc] init];
    
    WKWebView * wv = [[WKWebView alloc] initWithFrame:ctrl.view.bounds configuration:configuration];
@@ -1373,7 +1678,7 @@ index 7ffa4175..adfcc710 100644
    
    [ctrl setWebView: wv];
    
-@@ -642,6 +1308,7 @@ struct winsize __winSizeFromJSON(NSDictionary *json) {
+@@ -642,6 +1601,7 @@ struct winsize __winSizeFromJSON(NSDictionary *json) {
      [_device viewNotify:data];
    } else if ([operation isEqualToString:@"browser-ready"]) {
      [_browserView ready];
@@ -1381,7 +1686,7 @@ index 7ffa4175..adfcc710 100644
      [[NSNotificationCenter defaultCenter] postNotificationName:TermViewBrowserReadyNotificationKey object:self];
    } else if ([operation isEqualToString:@"ring-bell"]) {
      [_device viewDidReceiveBellRing];
-@@ -724,13 +1391,13 @@ struct winsize __winSizeFromJSON(NSDictionary *json) {
+@@ -724,13 +1684,13 @@ struct winsize __winSizeFromJSON(NSDictionary *json) {
  
  - (void)_handleSelectionChange:(NSDictionary *)data
  {
@@ -1413,6 +1718,38 @@ index a04ca8ab..0d79d58f 100644
          if let target = _wkWebView?.target(forAction: #selector(focusOnShellAction), withSender: self) as? UIResponder {
            target.perform(#selector(focusOnShellAction), with: self)
          }
+diff --git a/KB/Native/Views/KBWebView.swift b/KB/Native/Views/KBWebView.swift
+index c400a42b..112ef4bf 100644
+--- a/KB/Native/Views/KBWebView.swift
++++ b/KB/Native/Views/KBWebView.swift
+@@ -70,6 +70,9 @@ class KBWebView: KBWebViewBase {
+         modifierFlags: shortcut.modifiers,
+         propertyList: nil
+       )
++      if #available(iOS 15.0, *) {
++        cmd.wantsPriorityOverSystemBehavior = true
++      }
+       cmd.bindingAction = shortcut.action
+       
+       allBlinkKeyCommands.append(cmd)
+@@ -93,7 +96,7 @@ class KBWebView: KBWebViewBase {
+     // try first on space controller
+     let cmd = allBlinkKeyCommands.first(
+       where: {
+-        $0.input == input && $0.modifierFlags == flags
++        ($0.input == input || ($0.input != nil && $0.input?.lowercased() == input.lowercased())) && $0.modifierFlags == flags
+       }
+     )
+     
+@@ -113,7 +116,7 @@ class KBWebView: KBWebViewBase {
+     while let responder = iterator {
+       if let cmd = responder.keyCommands?.first(
+         where: {
+-          $0.input == input && $0.modifierFlags == flags
++          ($0.input == input || ($0.input != nil && $0.input?.lowercased() == input.lowercased())) && $0.modifierFlags == flags
+         }),
+          let action = cmd.action,
+          responder.canPerformAction(action, withSender: self)
 diff --git a/KB/Native/Views/KBWebViewBase.m b/KB/Native/Views/KBWebViewBase.m
 index 5551777d..2f3ec341 100644
 --- a/KB/Native/Views/KBWebViewBase.m
